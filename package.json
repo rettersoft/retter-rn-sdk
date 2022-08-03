@@ -1,6 +1,6 @@
 {
     "name": "@retter/rn-sdk",
-    "version": "0.1.0",
+    "version": "0.1.1",
     "description": "React Native Client sdk for retter.io",
     "main": "dist/index.js",
     "types": "dist/index.d.ts",
@@ -21,6 +21,7 @@
     "dependencies": {
         "@react-native-async-storage/async-storage": "^1.17.6",
         "axios": "^0.24.0",
+        "buffer": "^6.0.3",
         "firebase": "^9.6.2",
         "jwt-decode": "^3.1.2",
         "rxjs": "6.6.3"
