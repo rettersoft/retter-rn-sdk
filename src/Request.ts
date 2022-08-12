@@ -26,7 +26,7 @@ export default class Request {
     private axiosInstance?: AxiosInstance
 
     constructor(config: RetterClientConfig) {
-        this.createAxiosInstance()
+        this.createAxiosInstance(config.cacheMaxAge)
 
         this.url = config.url
         if (!config.region) config.region = RetterRegion.euWest1
@@ -36,11 +36,12 @@ export default class Request {
         this.platform = config.culture
     }
 
-    protected createAxiosInstance() {
+    protected createAxiosInstance(maxAge: number = 0) {
         this.axiosInstance! = axios.create({
             responseType: 'json',
             headers: {
                 'Content-Type': 'application/json',
+                'cache-control': `max-age=${maxAge}`,
             },
             timeout: 30000,
         })
