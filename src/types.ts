@@ -1,6 +1,6 @@
-import { Observable } from 'rxjs'
 import { AxiosResponse } from 'axios'
 import { Unsubscribe } from '@firebase/util'
+import { ReplaySubject, Subscription } from 'rxjs'
 
 // Config
 export interface RetterClientConfig {
@@ -11,7 +11,6 @@ export interface RetterClientConfig {
     platform?: string
     culture?: string
     retryConfig?: RetterRetryConfig
-    cacheMaxAge?: number
     [key: string]: any
 }
 
@@ -36,11 +35,11 @@ export interface RetterRegionConfig {
 export enum RetterActions {
     EMPTY = 'EMPTY',
     SIGN_IN = 'SIGN_IN',
-    SIGN_IN_ANONYM = 'SIGN_IN_ANONYM',
     COS_CALL = 'COS_CALL',
+    COS_LIST = 'COS_LIST',
     COS_STATE = 'COS_STATE',
     COS_INSTANCE = 'COS_INSTANCE',
-    COS_LIST = 'COS_LIST',
+    COS_STATIC_CALL = 'COS_STATIC_CALL',
 }
 
 export interface RetterActionWrapper {
@@ -64,7 +63,6 @@ export interface RetterAction {
 
 export enum RetterAuthStatus {
     SIGNED_IN = 'SIGNED_IN',
-    SIGNED_IN_ANONYM = 'SIGNED_IN_ANONYM',
     SIGNED_OUT = 'SIGNED_OUT',
     AUTH_FAILED = 'AUTH_FAILED',
 }
@@ -113,6 +111,7 @@ export interface RetterCloudObjectConfig {
     instanceId?: string
     method?: string
     headers?: { [key: string]: string }
+    pathParams?: string
     queryStringParams?: { [key: string]: string }
     httpMethod?: 'get' | 'delete' | 'post' | 'put'
     base64Encode?: boolean
@@ -165,8 +164,17 @@ export interface RetterCloudObjectCall extends RetterCloudObjectRequest {
     retryConfig?: RetterRetryConfig
 }
 
+export interface RetterCloudObjectStaticCall extends Omit<RetterCloudObjectConfig, 'useLocal' | 'instanceId' | 'key'> {
+    method: string
+}
+
 interface RetterCloudObjectStates {
-    role: Observable<any>
-    user: Observable<any>
-    public: Observable<any>
+    role: RetterCloudObjectStateObservable
+    user: RetterCloudObjectStateObservable
+    public: RetterCloudObjectStateObservable
+}
+
+interface RetterCloudObjectStateObservable {
+    queue?: ReplaySubject<any>
+    subscribe: (state?: any | undefined) => Subscription
 }

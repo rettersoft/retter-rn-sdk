@@ -22,6 +22,7 @@ import {
     RetterCloudObjectItem,
     RetterCloudObjectRequest,
     RetterCloudObjectState,
+    RetterCloudObjectStaticCall,
     RetterTokenPayload,
 } from './types'
 
@@ -55,6 +56,8 @@ export default class Retter {
     private firebaseAuth?: Auth
 
     private cloudObjects: RetterCloudObjectItem[] = []
+
+    private listeners: { [key: string]: any } = {}
 
     private constructor() {}
 
@@ -119,7 +122,8 @@ export default class Retter {
                     return ev
                 }),
                 switchMap(async ev => {
-                    await this.clearCloudObjects()
+                    if (this.firebaseAuth) await signOut(this.firebaseAuth!)
+                    this.clearFirebase()
                     if (ev.tokenData) {
                         await this.initFirebase(ev)
                     }
@@ -218,13 +222,10 @@ export default class Retter {
             return defer(() => of({ ...actionWrapper, response: true })).pipe(materialize())
         }
 
-        if (actionWrapper.action?.action === RetterActions.SIGN_IN_ANONYM) {
-            return defer(() => of({ ...actionWrapper, response: this.auth!.getAuthStatus(actionWrapper.tokenData) })).pipe(materialize())
-        }
-
         return defer(async () => {
             try {
                 const endpoint = this.getCosEndpoint(actionWrapper)
+
                 const response = await this.http!.call(this.clientConfig!.projectId, endpoint.path, endpoint.params)
                 return { ...actionWrapper, response }
             } catch (error: any) {
@@ -273,8 +274,10 @@ export default class Retter {
             queryParams[key] = data.queryStringParams![key]
         }
 
-        queryParams['__culture'] = data.culture ?? 'en-us'
-        if (data.platform) queryParams['__platform'] = data.platform
+        queryParams['__culture'] = data.culture ?? (this.clientConfig?.culture || 'en-us')
+        if (data.platform || this.clientConfig?.platform) {
+            queryParams['__platform'] = data.platform ?? this.clientConfig?.platform
+        }
 
         const params = {
             params: queryParams,
@@ -301,9 +304,14 @@ export default class Retter {
                 path: `LIST/${data.classId}`,
                 params,
             }
+        } else if (action.action === RetterActions.COS_STATIC_CALL) {
+            return {
+                path: `CALL/${data.classId}/${data.method}${data.pathParams ? `/${data.pathParams}` : ''}`,
+                params,
+            }
         } else {
             return {
-                path: `CALL/${data.classId}/${data.method}/${data.instanceId}`,
+                path: `CALL/${data.classId}/${data.method}/${data.instanceId}${data.pathParams ? `/${data.pathParams}` : ''}`,
                 params,
             }
         }
@@ -322,6 +330,11 @@ export default class Retter {
     }
 
     protected async getFirebaseState(config: RetterCloudObjectConfig) {
+        const { projectId } = this.clientConfig!
+        const user = await this.auth!.getCurrentUser()
+
+        const unsubscribers: Unsubscribe[] = []
+
         const queues = {
             role: new ReplaySubject(1),
             user: new ReplaySubject(1),
@@ -329,35 +342,76 @@ export default class Retter {
         }
 
         const state = {
-            role: queues.role.asObservable(),
-            user: queues.user.asObservable(),
-            public: queues.public.asObservable(),
+            role: {
+                queue: queues.role,
+                subscribe: (observer: any) => {
+                    if (!this.listeners[`${projectId}_${config.classId}_${config.instanceId}_role`]) {
+                        const listener = this.getFirebaseListener(
+                            queues.role,
+                            `/projects/${projectId}/classes/${config.classId}/instances/${config.instanceId}/roleState`,
+                            user!.identity!
+                        )
+                        unsubscribers.push(listener)
+                        this.listeners[`${projectId}_${config.classId}_${config.instanceId}_role`] = listener
+                    }
+
+                    return queues.role.subscribe(observer)
+                },
+            },
+            user: {
+                queue: queues.user,
+                subscribe: (observer: any) => {
+                    if (!this.listeners[`${projectId}_${config.classId}_${config.instanceId}_user`]) {
+                        const listener = this.getFirebaseListener(
+                            queues.user,
+                            `/projects/${projectId}/classes/${config.classId}/instances/${config.instanceId}/userState`,
+                            user!.userId!
+                        )
+                        unsubscribers.push(listener)
+                        this.listeners[`${projectId}_${config.classId}_${config.instanceId}_user`] = listener
+                    }
+
+                    return queues.user.subscribe(observer)
+                },
+            },
+            public: {
+                queue: queues.public,
+                subscribe: (observer: any) => {
+                    if (!this.listeners[`${projectId}_${config.classId}_${config.instanceId}_public`]) {
+                        const listener = this.getFirebaseListener(queues.public, `/projects/${projectId}/classes/${config.classId}/instances`, config.instanceId!)
+                        unsubscribers.push(listener)
+                        this.listeners[`${projectId}_${config.classId}_${config.instanceId}_public`] = listener
+                    }
+                    return queues.public.subscribe(observer)
+                },
+            },
         }
-
-        const { projectId } = this.clientConfig!
-        const user = await this.auth!.getCurrentUser()
-
-        const unsubscribers: Unsubscribe[] = []
-        unsubscribers.push(this.getFirebaseListener(queues.public, `/projects/${projectId}/classes/${config.classId}/instances`, config.instanceId!))
-        unsubscribers.push(this.getFirebaseListener(queues.user, `/projects/${projectId}/classes/${config.classId}/instances/${config.instanceId}/userState`, user!.userId!))
-        unsubscribers.push(this.getFirebaseListener(queues.role, `/projects/${projectId}/classes/${config.classId}/instances/${config.instanceId}/roleState`, user!.identity!))
 
         return { state, unsubscribers }
     }
 
     protected async clearCloudObjects() {
+        // clear listeners
+        const listeners = Object.values(this.listeners)
+        if (listeners.length > 0) {
+            listeners.map(i => i())
+
+            this.cloudObjects.map(i => {
+                i.state?.role.queue?.complete()
+                i.state?.user.queue?.complete()
+                i.state?.public.queue?.complete()
+            })
+        }
+        this.listeners = {}
+
         this.cloudObjects.map(i => i.unsubscribers.map(u => u()))
         this.cloudObjects = []
+
         if (this.firebaseAuth) await signOut(this.firebaseAuth!)
         this.clearFirebase()
     }
 
     // Public Methods
-    public async signInAnonymously(): Promise<RetterAuthChangedEvent> {
-        if (!this.initialized) throw new Error('Retter SDK not initialized.')
-        return await this.sendToActionQueue<RetterAuthChangedEvent>({ action: RetterActions.SIGN_IN_ANONYM })
-    }
-
     public async authenticateWithCustomToken(token: string): Promise<RetterAuthChangedEvent> {
         if (!this.initialized) throw new Error('Retter SDK not initialized.')
 
@@ -451,12 +505,21 @@ export default class Retter {
             methods: instance?.methods ?? [],
             response: instance?.response ?? null,
             instanceId: config.instanceId!,
-            isNewInstance: instance?.isNewInstance ?? false,
+            isNewInstance: instance?.newInstance ?? false,
         }
 
         this.cloudObjects.push({ ...retVal, config, unsubscribers })
 
         return retVal
+    }
+
+    public async makeStaticCall<T>(params: RetterCloudObjectStaticCall): Promise<RetterCallResponse<T>> {
+        if (!this.initialized) throw new Error('Retter SDK not initialized.')
+
+        return await this.sendToActionQueue<RetterCallResponse<T>>({
+            action: RetterActions.COS_STATIC_CALL,
+            data: { ...params, classId: params.classId },
+        })
     }
 
     public get authStatus(): Observable<RetterAuthChangedEvent> {
