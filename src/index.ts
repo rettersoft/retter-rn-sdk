@@ -1,5 +1,5 @@
 import { Unsubscribe } from '@firebase/util'
-import { getFirestore } from 'firebase/firestore'
+import { getFirestore, initializeFirestore } from 'firebase/firestore'
 import { FirebaseApp, initializeApp } from 'firebase/app'
 import { doc, Firestore, onSnapshot } from 'firebase/firestore'
 import { Auth, getAuth, signInWithCustomToken, signOut } from 'firebase/auth'
@@ -247,7 +247,9 @@ export default class Retter {
             this.clientConfig!.projectId
         )
 
-        this.firestore = getFirestore(this.firebase!)
+        this.firestore = initializeFirestore(this.firebase!, {
+            experimentalForceLongPolling: true,
+        })
         this.firebaseAuth = getAuth(this.firebase!)
 
         await signInWithCustomToken(this.firebaseAuth!, firebaseConfig.customToken)
