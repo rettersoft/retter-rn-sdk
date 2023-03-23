@@ -331,8 +331,6 @@ export default class Retter {
 
     protected async getFirebaseState(config: RetterCloudObjectConfig) {
         const { projectId } = this.clientConfig!
-        console.log('getFirebaseState', this.auth)
-
         const user = await this.auth!.getCurrentUser()
 
         const unsubscribers: Unsubscribe[] = []
@@ -363,8 +361,6 @@ export default class Retter {
             user: {
                 queue: queues.user,
                 subscribe: (observer: any) => {
-                    console.log('user', user)
-
                     if (!this.listeners[`${projectId}_${config.classId}_${config.instanceId}_user`]) {
                         const listener = this.getFirebaseListener(
                             queues.user,

@@ -1,4 +1,5 @@
-import axios, { AxiosInstance, AxiosResponse } from 'axios'
+import { Agent } from 'https'
+import axios, { AxiosInstance, AxiosRequestConfig, AxiosResponse } from 'axios'
 
 import { base64Encode, sort } from './helpers'
 import { RetterClientConfig, RetterRegion, RetterRegionConfig } from './types'
@@ -25,26 +26,35 @@ export default class Request {
 
     private axiosInstance?: AxiosInstance
 
+    private sslPinningEnabled: boolean = true
+
     constructor(config: RetterClientConfig) {
         this.createAxiosInstance()
 
         this.url = config.url
         if (!config.region) config.region = RetterRegion.euWest1
         this.region = RetterRegions.find(region => region.id === config.region)
+        if (config.sslPinningEnabled === false) this.sslPinningEnabled = false
 
         this.culture = config.culture
         this.platform = config.culture
     }
 
     protected createAxiosInstance() {
-        this.axiosInstance! = axios.create({
+        const axiosConfig: AxiosRequestConfig = {
             responseType: 'json',
             headers: {
                 'Content-Type': 'application/json',
                 'cache-control': `max-age=0`,
             },
             timeout: 30000,
-        })
+        }
+
+        if (this.sslPinningEnabled === false) {
+            axiosConfig.httpsAgent = new Agent({ rejectUnauthorized: false })
+        }
+
+        this.axiosInstance! = axios.create(axiosConfig)
     }
 
     protected buildUrl(projectId: string, path: string) {
