@@ -123,7 +123,7 @@ export default class Retter {
                 }),
                 switchMap(async ev => {
                     if (this.firebaseAuth) await signOut(this.firebaseAuth!)
-                    this.clearFirebase()
+                    await this.clearCloudObjects()
                     if (ev.tokenData) {
                         await this.initFirebase(ev)
                     }
@@ -331,6 +331,8 @@ export default class Retter {
 
     protected async getFirebaseState(config: RetterCloudObjectConfig) {
         const { projectId } = this.clientConfig!
+        console.log('getFirebaseState', this.auth)
+
         const user = await this.auth!.getCurrentUser()
 
         const unsubscribers: Unsubscribe[] = []
@@ -361,6 +363,8 @@ export default class Retter {
             user: {
                 queue: queues.user,
                 subscribe: (observer: any) => {
+                    console.log('user', user)
+
                     if (!this.listeners[`${projectId}_${config.classId}_${config.instanceId}_user`]) {
                         const listener = this.getFirebaseListener(
                             queues.user,
@@ -447,6 +451,7 @@ export default class Retter {
         }
 
         const seekedObject = this.cloudObjects.find(r => r.config.classId === config.classId && r.config.instanceId === config.instanceId)
+
         if (seekedObject) {
             return {
                 call: seekedObject.call,
