@@ -100,7 +100,7 @@ export default class Auth {
 
         // refresh token is valid, but access token is expired
         if (refreshTokenExpiresAt > now && accessTokenExpiresAt <= now) {
-            const freshTokenData = await this.getFreshToken(tokenData.refreshToken, tokenData.refreshTokenDecoded.userId!)
+            const freshTokenData = await this.getFreshToken(tokenData.refreshToken)
 
             freshTokenData.accessTokenDecoded = this.decodeToken(freshTokenData.accessToken)
             freshTokenData.refreshTokenDecoded = this.decodeToken(freshTokenData.refreshToken)
@@ -142,12 +142,11 @@ export default class Auth {
      * It tries to get a new access token from the server.
      *
      * @param refreshToken
-     * @param userId string // used in the url
      * @returns RetterTokenData
      */
-    protected async getFreshToken(refreshToken: string, userId: string): Promise<RetterTokenData> {
-        const path = `/AUTH/refreshToken`
-        const response = await this.http!.call<RetterTokenData>(this.clientConfig!.projectId, path, { method: 'get', params: { refreshToken } })
+    protected async getFreshToken(refreshToken: string): Promise<RetterTokenData> {
+        const path = `/TOKEN/refresh`
+        const response = await this.http!.call<RetterTokenData>(this.clientConfig!.projectId, path, { method: 'post', data: { refreshToken } })
 
         return this.formatTokenData(response.data)
     }
@@ -160,9 +159,9 @@ export default class Auth {
      * @returns RetterTokenData
      */
     public async signIn(token: string): Promise<RetterTokenData> {
-        const path = `/AUTH/authWithCustomToken`
+        const path = `/TOKEN/auth`
 
-        const { data: tokenData } = await this.http!.call<RetterTokenData>(this.clientConfig!.projectId, path, { method: 'get', params: { customToken: token } })
+        const { data: tokenData } = await this.http!.call<RetterTokenData>(this.clientConfig!.projectId, path, { method: 'post', data: { customToken: token } })
 
         return this.formatTokenData(tokenData)
     }
@@ -177,9 +176,16 @@ export default class Auth {
             const tokenData = await this.getCurrentTokenData()
 
             if (tokenData) {
-                const path = `/AUTH/signOut`
+                const path = `/TOKEN/signOut`
 
-                await this.http!.call(this.clientConfig!.projectId, path, { method: 'get', params: { _token: tokenData.accessToken } })
+                await this.http!.call(this.clientConfig!.projectId, path, {
+                    method: 'get',
+                    params: {
+                        header: {
+                            Authorization: `Bearer ${tokenData.accessToken}`,
+                        },
+                    },
+                })
             }
         } catch (error) {}
     }
