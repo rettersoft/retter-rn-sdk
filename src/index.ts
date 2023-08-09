@@ -140,8 +140,9 @@ export default class Retter {
         // on error
         authResult.pipe(filter(r => r.hasValue === false && r.kind === 'E')).subscribe(e => {
             if (e.error && e.error.action && e.error.action.resolve) {
+                const isNetworkError =  e.error.responseError?.message === 'Network Error'
                 const response: RetterAuthChangedEvent = {
-                    authStatus: RetterAuthStatus.AUTH_FAILED,
+                    authStatus: isNetworkError ? RetterAuthStatus.CONNECTION_FAILED : RetterAuthStatus.AUTH_FAILED,
                     message: e.error.responseError.response?.data,
                 }
                 e.error.action.resolve(response)
@@ -177,6 +178,12 @@ export default class Retter {
 
         actionResult.pipe(filter(r => r.hasValue === false && r.kind === 'E')).subscribe(e => {
             if (e.error && e.error.action && e.error.action.reject && e.error.responseError) {
+                const isNetworkError =  e.error.responseError?.message === 'Network Error'
+                if(isNetworkError) {
+                    this.authStatusSubject.next({
+                        authStatus: RetterAuthStatus.CONNECTION_FAILED,
+                    })
+                }
                 e.error.action.reject(e.error.responseError)
             }
         })
@@ -199,17 +206,18 @@ export default class Retter {
     protected async getActionWithTokenData(action: RetterAction): Promise<RetterActionWrapper> {
         try {
             const ev = { action, tokenData: await this.auth!.getTokenData() }
-            await this.initFirebase(ev)
+            await this.initFirebase(ev).catch(() => {})
             return ev
         } catch (error: any) {
-            await this.signOut()
-            return { action }
+            const isNetworkError =  error.message === 'Network Error'
+            if(!isNetworkError) await this.signOut()
+            return { action, isNetworkError }
         }
     }
 
     protected fireAuthStatus(actionWrapper: RetterActionWrapper) {
         const event = this.auth!.getAuthStatus(actionWrapper.tokenData)
-
+        if(actionWrapper.isNetworkError) event.authStatus = RetterAuthStatus.CONNECTION_FAILED
         this.authStatusSubject.next(event)
     }
 
@@ -253,7 +261,7 @@ export default class Retter {
         })
         this.firebaseAuth = getAuth(this.firebase!)
 
-        await signInWithCustomToken(this.firebaseAuth!, firebaseConfig.customToken)
+        await signInWithCustomToken(this.firebaseAuth!, firebaseConfig.customToken).catch(() => {})
 
         return actionWrapper
     }
