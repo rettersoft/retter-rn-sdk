@@ -1,7 +1,7 @@
 import { Agent } from 'https'
 import axios, { AxiosInstance, AxiosRequestConfig, AxiosResponse } from 'axios'
 
-import { base64Encode, sort } from './helpers'
+import { base64Encode, getInstallationId, sort } from './helpers'
 import { RetterClientConfig, RetterRegion, RetterRegionConfig } from './types'
 
 const RetterRegions: RetterRegionConfig[] = [
@@ -75,7 +75,10 @@ export default class Request {
                 queryStringParams.__isbase64 = true
             }
 
-            return await this.axiosInstance!({ url: this.buildUrl(projectId, path), ...params, params: queryStringParams })
+            const headers = { ...params.headers }
+            headers.installationId = await getInstallationId()
+
+            return await this.axiosInstance!({ url: this.buildUrl(projectId, path), ...params, params: queryStringParams, headers })
         } catch (error: any) {
             throw error
         }
