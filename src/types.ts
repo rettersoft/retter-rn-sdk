@@ -87,7 +87,6 @@ export interface RetterTokenData {
         projectId: string
         customToken: string
     }
-    diff: number
     accessTokenDecoded?: RetterTokenPayload
     refreshTokenDecoded?: RetterTokenPayload
 }

@@ -90,7 +90,10 @@ export default class Auth {
     public async getTokenData(): Promise<RetterTokenData | undefined> {
         const tokenData = await this.getCurrentTokenData()
         if (!tokenData) return undefined
-        const now = tokenData.diff + Math.round(new Date().getTime() / 1000) + 30 // Plus 30 seconds, just in case.
+
+        const serverTime = tokenData.accessTokenDecoded?.iat
+        let now = Math.round(new Date().getTime() / 1000) + 30 // Plus 30 seconds, just in case.
+        if (serverTime) now += (serverTime - Math.round(Date.now() / 1000))
 
         tokenData.accessTokenDecoded = this.decodeToken(tokenData.accessToken)
         tokenData.refreshTokenDecoded = this.decodeToken(tokenData.refreshToken)
@@ -131,9 +134,6 @@ export default class Auth {
     protected formatTokenData(tokenData: RetterTokenData): RetterTokenData {
         tokenData.accessTokenDecoded = this.decodeToken(tokenData.accessToken)
         tokenData.refreshTokenDecoded = this.decodeToken(tokenData.refreshToken)
-        if (tokenData.accessTokenDecoded.iat) {
-            tokenData.diff = tokenData.accessTokenDecoded.iat - Math.floor(Date.now() / 1000)
-        }
 
         return tokenData
     }
