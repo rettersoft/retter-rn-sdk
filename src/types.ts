@@ -1,6 +1,7 @@
 import { AxiosResponse } from 'axios'
 import { Unsubscribe } from '@firebase/util'
 import { ReplaySubject, Subscription } from 'rxjs'
+import { Observable } from './observable'
 
 // Config
 export interface RetterClientConfig {
@@ -34,8 +35,8 @@ export interface RetterRegionConfig {
 // Actions
 
 export enum RetterActions {
-    EMPTY = 'EMPTY',
-    SIGN_IN = 'SIGN_IN',
+    // EMPTY = 'EMPTY',
+    // SIGN_IN = 'SIGN_IN',
     COS_CALL = 'COS_CALL',
     COS_LIST = 'COS_LIST',
     COS_STATE = 'COS_STATE',
@@ -89,6 +90,7 @@ export interface RetterTokenData {
     }
     accessTokenDecoded?: RetterTokenPayload
     refreshTokenDecoded?: RetterTokenPayload
+    diff?: number
 }
 
 export interface RetterTokenPayload {
@@ -98,8 +100,8 @@ export interface RetterTokenPayload {
     userId?: string
     anonymous?: boolean
     identity?: string
-    iat?: number
-    exp?: number
+    iat: number
+    exp: number
     claims?: {
         [key: string]: any
     }
@@ -131,13 +133,15 @@ export interface RetterCloudObject {
     response?: any
     call<T>(params: RetterCloudObjectCall): Promise<RetterCallResponse<T>>
     listInstances(params?: RetterCloudObjectRequest): Promise<string[]>
-    getState(params?: RetterCloudObjectRequest): Promise<RetterCallResponse<RetterCloudObjectState>>
+    getState(
+        params?: RetterCloudObjectRequest
+    ): Promise<RetterCallResponse<RetterCloudObjectState>>
     state?: RetterCloudObjectStates
 }
 
 export interface RetterCloudObjectItem extends RetterCloudObject {
     config: RetterCloudObjectConfig
-    unsubscribers: Unsubscribe[]
+    unsubscribers: (() => void)[]
 }
 
 export type RetterCallResponse<T> = Omit<AxiosResponse<T>, 'config' | 'request'>
@@ -159,14 +163,18 @@ export interface RetterCloudObjectState {
     private: { [key: string]: any }
 }
 
-export type RetterCloudObjectRequest = Omit<RetterCloudObjectConfig, 'classId' | 'useLocal'>
+export type RetterCloudObjectRequest = Omit<
+    RetterCloudObjectConfig,
+    'classId' | 'useLocal'
+>
 
 export interface RetterCloudObjectCall extends RetterCloudObjectRequest {
     method: string
     retryConfig?: RetterRetryConfig
 }
 
-export interface RetterCloudObjectStaticCall extends Omit<RetterCloudObjectConfig, 'useLocal' | 'instanceId' | 'key'> {
+export interface RetterCloudObjectStaticCall
+    extends Omit<RetterCloudObjectConfig, 'useLocal' | 'instanceId' | 'key'> {
     method: string
 }
 
@@ -177,6 +185,8 @@ interface RetterCloudObjectStates {
 }
 
 interface RetterCloudObjectStateObservable {
-    queue?: ReplaySubject<any>
-    subscribe: (state?: any | undefined) => Subscription
+    queue?: Observable<any>
+    subscribe: (state?: any | undefined) => {
+        unsubscribe: () => void
+    }
 }

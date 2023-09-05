@@ -1,17 +1,7 @@
-import { Unsubscribe } from '@firebase/util'
-import { FirebaseApp, initializeApp } from 'firebase/app'
-import { doc, Firestore, onSnapshot } from 'firebase/firestore'
-import { getFirestore, initializeFirestore } from 'firebase/firestore'
-import { Auth, getAuth, signInWithCustomToken, signOut } from 'firebase/auth'
-import { defer, Notification, Observable, of, ReplaySubject, Subject } from 'rxjs'
-import { concatMap, distinctUntilChanged, filter, map, materialize, mergeMap, share, switchMap, tap } from 'rxjs/operators'
-
-import RetterAuth from './Auth'
-import RetterRequest from './Request'
+// import AsyncStorage from '@react-native-async-storage/async-storage'
+import { Observable } from './observable'
 import {
-    RetterAction,
     RetterActions,
-    RetterActionWrapper,
     RetterAuthChangedEvent,
     RetterAuthStatus,
     RetterCallResponse,
@@ -23,8 +13,19 @@ import {
     RetterCloudObjectRequest,
     RetterCloudObjectState,
     RetterCloudObjectStaticCall,
+    RetterRegion,
+    RetterRegionConfig,
+    RetterTokenData,
     RetterTokenPayload,
 } from './types'
+import jwtDecode from 'jwt-decode'
+import { FirebaseApp, initializeApp } from 'firebase/app'
+import { doc, Firestore, onSnapshot } from 'firebase/firestore'
+import { initializeFirestore } from 'firebase/firestore'
+import { Auth, getAuth, signInWithCustomToken, signOut } from 'firebase/auth'
+import axios, { AxiosInstance, AxiosRequestConfig } from 'axios'
+import { Agent } from 'https'
+import { base64Encode, getInstallationId, sort } from './helpers'
 
 export * from './types'
 
@@ -32,22 +33,41 @@ const DEFAULT_RETRY_DELAY = 50 // in ms
 const DEFAULT_RETRY_COUNT = 3
 const DEFAULT_RETRY_RATE = 1.5
 
+const AsyncStorage: any = {
+    data: {},
+    getItem: async (key: string) => {
+        return AsyncStorage.data[key]
+    },
+    setItem: async (key: string, value: string) => {
+        AsyncStorage.data[key] = value
+    },
+}
+
+const RetterRegions: RetterRegionConfig[] = [
+    {
+        id: RetterRegion.euWest1,
+        url: 'api.retter.io',
+    },
+    {
+        id: RetterRegion.euWest1Beta,
+        url: 'test-api.retter.io',
+    },
+]
+
 export default class Retter {
     private static instances: Retter[] = []
 
-    private initialized: boolean = false
+    private initialized = false
 
     private clientConfig?: RetterClientConfig
 
-    private auth?: RetterAuth
+    private cloudObjects: RetterCloudObjectItem[] = []
 
-    private http?: RetterRequest
+    private listeners: { [key: string]: any } = {}
 
-    private authQueue = new Subject<any>()
+    private tokenStorageKey?: string
 
-    private actionQueue = new Subject<RetterAction>()
-
-    private authStatusSubject = new ReplaySubject<RetterAuthChangedEvent>(1)
+    private authStatusSubject: Observable<RetterAuthChangedEvent>
 
     private firebase?: FirebaseApp
 
@@ -55,197 +75,225 @@ export default class Retter {
 
     private firebaseAuth?: Auth
 
-    private cloudObjects: RetterCloudObjectItem[] = []
+    private refreshTokenPromise: Promise<any> | null = null
 
-    private listeners: { [key: string]: any } = {}
+    private sslPinningEnabled: boolean = true
 
-    private constructor() {}
+    protected axiosInstance?: AxiosInstance
 
     public static getInstance(config: RetterClientConfig): Retter {
-        const instance = Retter.instances.find(instance => instance.clientConfig?.projectId === config.projectId)
+        const instance = this.instances.find(
+            (instance) => instance.clientConfig?.projectId === config.projectId
+        )
         if (instance) return instance
 
-        const newInstance = new Retter()
-        newInstance.init(config)
-        Retter.instances.push(newInstance)
-
+        const newInstance = new Retter(config)
+        this.instances.push(newInstance)
         return newInstance
     }
 
-    protected init(config: RetterClientConfig) {
+    protected constructor(config: RetterClientConfig) {
         if (this.initialized) throw new Error('SDK already initialized.')
         this.initialized = true
-
-        if (!config.retryConfig) config.retryConfig = {}
-        if (!config.retryConfig.delay) config.retryConfig.delay = DEFAULT_RETRY_DELAY
-        if (!config.retryConfig.count) config.retryConfig.count = DEFAULT_RETRY_COUNT
-        if (!config.retryConfig.rate) config.retryConfig.rate = DEFAULT_RETRY_RATE
-
         this.clientConfig = config
 
-        this.auth! = new RetterAuth(config)
-        this.http! = new RetterRequest(config)
+        this.tokenStorageKey = `RIO_TOKENS_KEY.${config.projectId}`
+        if (!this.clientConfig.region)
+            this.clientConfig.region = RetterRegion.euWest1
 
-        this.auth!.setHttp(this.http!)
+        if (!this.clientConfig.retryConfig) this.clientConfig.retryConfig = {}
+        if (!this.clientConfig.retryConfig.delay)
+            this.clientConfig.retryConfig.delay = DEFAULT_RETRY_DELAY
+        if (!this.clientConfig.retryConfig.count)
+            this.clientConfig.retryConfig.count = DEFAULT_RETRY_COUNT
+        if (!this.clientConfig.retryConfig.rate)
+            this.clientConfig.retryConfig.rate = DEFAULT_RETRY_RATE
 
-        this.processAuthQueue()
-        this.processActionQueue()
-
-        setTimeout(async () => {
-            const tokenData = await this.auth!.getCurrentTokenData()
-            this.fireAuthStatus({ tokenData })
-        }, 1)
-    }
-
-    protected processAuthQueue() {
-        const authResult = this.authQueue.pipe(
-            concatMap(action => {
-                return defer(async () => {
-                    try {
-                        const response = await this.auth!.signIn(action.data)
-                        return { action, response }
-                    } catch (error) {
-                        throw { action, responseError: error }
-                    }
-                }).pipe(materialize())
-            }),
-            share()
+        this.authStatusSubject = new Observable<RetterAuthChangedEvent>(
+            () => {}
         )
 
-        // on success
-        authResult
-            .pipe(
-                filter(r => r.hasValue && r.kind === 'N'),
-                map(e => ({ ...e.value, tokenData: e.value?.response })),
-                switchMap(async ev => {
-                    await this.storeTokenData(ev)
-                    return ev
-                }),
-                switchMap(async ev => {
-                    if (this.firebaseAuth) await signOut(this.firebaseAuth!)
-                    await this.clearCloudObjects()
-                    if (ev.tokenData) {
-                        await this.initFirebase(ev)
+        this.createAxiosInstance()
+        this.initAuth()
+    }
+
+    // #region Request
+    protected createAxiosInstance() {
+        const axiosConfig: AxiosRequestConfig = {
+            responseType: 'json',
+            headers: {
+                'Content-Type': 'application/json',
+                'cache-control': `max-age=0`,
+            },
+            timeout: 30000,
+        }
+
+        if (this.sslPinningEnabled === false) {
+            axiosConfig.httpsAgent = new Agent({ rejectUnauthorized: false })
+        }
+
+        this.axiosInstance! = axios.create(axiosConfig)
+    }
+
+    protected async makeAPIRequest<T>(
+        action: RetterActions,
+        data: RetterCloudObjectConfig
+    ): Promise<RetterCallResponse<T>> {
+        const endpoint = this.generateEndpoint(action, data)
+        const tokens = await this.getCurrentTokenData()
+
+        const now = Math.floor(Date.now() / 1000)
+        const safeNow = now + 30 + (tokens?.diff ?? 0) // add server time diff
+        const accessTokenDecoded = tokens?.accessTokenDecoded
+
+        if (accessTokenDecoded && accessTokenDecoded.exp < safeNow) {
+            if (this.refreshTokenPromise) {
+                try {
+                    const newTokenData = await this.refreshTokenPromise
+                    const newData = { ...data }
+                    newData.headers = {
+                        ...newData.headers,
+                        Authorization: `Bearer ${newTokenData.accessToken}`,
                     }
-                    this.fireAuthStatus(ev)
-                    return ev
-                })
-            )
-            .subscribe(ev => {
-                if (ev.action?.resolve) {
-                    ev.action.resolve(this.auth?.getAuthStatus(ev.tokenData))
+
+                    return await this.executeRequest(endpoint, newData)
+                } catch (error) {
+                    throw error
                 }
-            })
+            }
 
-        // on error
-        authResult.pipe(filter(r => r.hasValue === false && r.kind === 'E')).subscribe(e => {
-            if (e.error && e.error.action && e.error.action.resolve) {
-                const isNetworkError =  e.error.responseError?.message === 'Network Error'
-                const response: RetterAuthChangedEvent = {
-                    authStatus: isNetworkError ? RetterAuthStatus.CONNECTION_FAILED : RetterAuthStatus.AUTH_FAILED,
-                    message: e.error.responseError.response?.data,
+            this.refreshTokenPromise = (async () => {
+                try {
+                    const response = await this.refreshToken()
+                    this.refreshTokenPromise = null
+                    return response.accessToken
+                } catch (error) {
+                    this.refreshTokenPromise = null
+                    throw error
                 }
-                e.error.action.resolve(response)
-            }
-        })
+            })()
 
-        this.authStatus.subscribe()
-    }
-
-    protected processActionQueue() {
-        const actionResult = this.actionQueue.asObservable().pipe(
-            // Get current token data if exists and store it in action
-            concatMap(this.getActionWithTokenData.bind(this)),
-            // Fire auth status event
-            tap(this.fireAuthStatus.bind(this)),
-            // Make sure we have a token
-            filter(ev => ev.tokenData !== null),
-            // Store token data
-            switchMap(async ev => {
-                await this.storeTokenData(ev)
-                return ev
-            }),
-            // Process action
-            mergeMap(this.processAction.bind(this)),
-            share()
-        )
-
-        actionResult.pipe(filter(r => r.hasValue && r.kind === 'N')).subscribe(e => {
-            if (e.value && e.value.action && e.value.action.resolve && e.value.response) {
-                e.value.action.resolve(e.value.response)
-            }
-        })
-
-        actionResult.pipe(filter(r => r.hasValue === false && r.kind === 'E')).subscribe(e => {
-            if (e.error && e.error.action && e.error.action.reject && e.error.responseError) {
-                const isNetworkError =  e.error.responseError?.message === 'Network Error'
-                if(isNetworkError) {
-                    this.authStatusSubject.next({
-                        authStatus: RetterAuthStatus.CONNECTION_FAILED,
-                    })
-                }
-                e.error.action.reject(e.error.responseError)
-            }
-        })
-    }
-
-    //
-    protected async sendToAuthQueue<T>(action: RetterAction): Promise<T> {
-        return new Promise((resolve, reject) => {
-            this.authQueue.next({ ...action, reject, resolve })
-        })
-    }
-
-    protected async sendToActionQueue<T>(action: RetterAction): Promise<T> {
-        return new Promise((resolve, reject) => {
-            this.actionQueue.next({ ...action, reject, resolve })
-        })
-    }
-
-    //
-    protected async getActionWithTokenData(action: RetterAction): Promise<RetterActionWrapper> {
-        try {
-            const ev = { action, tokenData: await this.auth!.getTokenData() }
-            await this.initFirebase(ev).catch(() => {})
-            return ev
-        } catch (error: any) {
-            const isNetworkError =  error.message === 'Network Error'
-            if(!isNetworkError) await this.signOut()
-            return { action, isNetworkError }
-        }
-    }
-
-    protected fireAuthStatus(actionWrapper: RetterActionWrapper) {
-        const event = this.auth!.getAuthStatus(actionWrapper.tokenData)
-        if(actionWrapper.isNetworkError) event.authStatus = RetterAuthStatus.CONNECTION_FAILED
-        this.authStatusSubject.next(event)
-    }
-
-    protected async storeTokenData(actionWrapper: RetterActionWrapper) {
-        await this.auth!.storeTokenData(actionWrapper.tokenData!)
-    }
-
-    protected processAction(actionWrapper: RetterActionWrapper): Observable<Notification<RetterActionWrapper>> {
-        if (actionWrapper.action?.action === RetterActions.EMPTY) {
-            return defer(() => of({ ...actionWrapper, response: true })).pipe(materialize())
-        }
-
-        return defer(async () => {
             try {
-                const endpoint = this.getCosEndpoint(actionWrapper)
-
-                const response = await this.http!.call(this.clientConfig!.projectId, endpoint.path, endpoint.params)
-                return { ...actionWrapper, response }
-            } catch (error: any) {
-                throw { ...actionWrapper, responseError: error }
+                const newToken = await this.refreshTokenPromise
+                const newData = { ...data }
+                newData.headers = {
+                    ...newData.headers,
+                    Authorization: `Bearer ${newToken}`,
+                }
+                return await this.executeRequest(endpoint, newData)
+            } catch (error) {
+                throw error
             }
-        }).pipe(materialize())
+        } else {
+            const newData = { ...data }
+            if (tokens?.accessToken) {
+                newData.headers = {
+                    ...newData.headers,
+                    Authorization: `Bearer ${tokens.accessToken}`,
+                }
+            }
+            return await this.executeRequest(endpoint, newData)
+        }
     }
 
-    // Firebase
-    protected async initFirebase(actionWrapper: RetterActionWrapper) {
-        const firebaseConfig = actionWrapper.tokenData?.firebase
-        if (!firebaseConfig || this.firebase) return actionWrapper
+    protected async executeRequest(
+        url: string,
+        config: RetterCloudObjectConfig
+    ): Promise<any> {
+        const queryStringParams = { ...config.queryStringParams }
+        if (!queryStringParams.__culture)
+            queryStringParams.__culture = this.clientConfig?.culture ?? 'en-us'
+        if (!queryStringParams.__platform && this.clientConfig?.platform)
+            queryStringParams.__platform = this.clientConfig.platform
+
+        if (config.httpMethod === 'get' && config.body) {
+            const data = base64Encode(JSON.stringify(sort(config.body)))
+            delete config.body
+            queryStringParams.data = data
+            queryStringParams.__isbase64 = 'true'
+        }
+
+        const headers = { ...config.headers }
+        headers.installationId = await getInstallationId()
+
+        return new Promise((resolve, reject) => {
+            this.axiosInstance!({
+                url,
+                method: config.httpMethod ?? 'POST',
+                headers,
+                params: queryStringParams,
+                data: config.body,
+            })
+                .then((response) => {
+                    resolve(response)
+                })
+                .catch((error) => {
+                    reject(error)
+                })
+        })
+    }
+
+    protected generateEndpoint(
+        action: RetterActions,
+        data: RetterCloudObjectConfig
+    ): string {
+        const prefixes: Record<RetterActions, string> = {
+            [RetterActions.COS_CALL]: 'CALL',
+            [RetterActions.COS_LIST]: 'LIST',
+            [RetterActions.COS_STATE]: 'STATE',
+            [RetterActions.COS_INSTANCE]: 'INSTANCE',
+            [RetterActions.COS_STATIC_CALL]: 'CALL',
+        }
+
+        let url = `/${prefixes[action]}`
+        if (data.classId) url += `/${data.classId}`
+
+        if (action === RetterActions.COS_INSTANCE) {
+            const instanceId = data.key
+                ? `${data.key.name}!${data.key.value}`
+                : data.instanceId
+
+            if (instanceId) url += `/${instanceId}`
+        }
+
+        if (action === RetterActions.COS_STATE) {
+            url += `/${data.instanceId}`
+        }
+
+        if (action === RetterActions.COS_LIST) {
+            // do nothing
+        }
+
+        if (
+            action === RetterActions.COS_CALL ||
+            action === RetterActions.COS_STATIC_CALL
+        ) {
+            url += `/${data.method}`
+            if (data.instanceId) url += `/${data.instanceId}`
+            if (data.pathParams) url += `/${data.pathParams}`
+        }
+
+        return this.buildUrl(this.clientConfig!.projectId, url)
+    }
+
+    protected buildUrl(projectId: string, path: string) {
+        const prefix = this.clientConfig?.url
+            ? `${this.clientConfig.url}`
+            : `${projectId}.${
+                  RetterRegions.find(
+                      (region) => region.id === this.clientConfig?.region
+                  )?.url
+              }`
+
+        return `https://${prefix}/${this.clientConfig?.projectId}${path}`
+    }
+
+    // #endregion
+
+    // #region Firebase
+    protected async initFirebase(tokenData?: RetterTokenData) {
+        const firebaseConfig = tokenData?.firebase
+        if (!firebaseConfig || this.firebase) return
 
         this.firebase = initializeApp(
             {
@@ -261,9 +309,10 @@ export default class Retter {
         })
         this.firebaseAuth = getAuth(this.firebase!)
 
-        await signInWithCustomToken(this.firebaseAuth!, firebaseConfig.customToken).catch(() => {})
-
-        return actionWrapper
+        await signInWithCustomToken(
+            this.firebaseAuth!,
+            firebaseConfig.customToken
+        ).catch(() => {})
     }
 
     protected clearFirebase() {
@@ -272,68 +321,14 @@ export default class Retter {
         this.firebaseAuth = undefined
     }
 
-    // Cloud Objects
-    protected getCosEndpoint(ev: RetterActionWrapper): { path: string; params: any } {
-        const action = ev.action!
-        const data = action.data as RetterCloudObjectConfig
-        const queryParams: any = {}
-
-        for (let key in data.queryStringParams || []) {
-            queryParams[key] = data.queryStringParams![key]
-        }
-
-        queryParams['__culture'] = data.culture ?? (this.clientConfig?.culture || 'en-us')
-        if (data.platform || this.clientConfig?.platform) {
-            queryParams['__platform'] = data.platform ?? this.clientConfig?.platform
-        }
-
-        const params = {
-            params: queryParams,
-            method: data.httpMethod ?? 'post',
-            data: data.body,
-            base64Encode: data.base64Encode ?? true,
-            headers: { ...data.headers },
-        }
-
-        const accessToken = data.token ?? ev.tokenData?.accessToken
-        if (accessToken) {
-            params.headers['Authorization'] = `Bearer ${accessToken}`
-        }
-
-        if (action.action === RetterActions.COS_INSTANCE) {
-            const instanceId = data.key ? `${data.key.name}!${data.key.value}` : data.instanceId
-
-            return {
-                path: `INSTANCE/${data.classId}${instanceId ? `/${instanceId}` : ''}`,
-                params,
-            }
-        } else if (action.action === RetterActions.COS_STATE) {
-            return {
-                path: `STATE/${data.classId}/${data.instanceId}`,
-                params,
-            }
-        } else if (action.action === RetterActions.COS_LIST) {
-            return {
-                path: `LIST/${data.classId}`,
-                params,
-            }
-        } else if (action.action === RetterActions.COS_STATIC_CALL) {
-            return {
-                path: `CALL/${data.classId}/${data.method}${data.pathParams ? `/${data.pathParams}` : ''}`,
-                params,
-            }
-        } else {
-            return {
-                path: `CALL/${data.classId}/${data.method}/${data.instanceId}${data.pathParams ? `/${data.pathParams}` : ''}`,
-                params,
-            }
-        }
-    }
-
-    protected getFirebaseListener(queue: ReplaySubject<any>, collection: string, documentId: string): Unsubscribe {
+    protected getFirebaseListener(
+        queue: any,
+        collection: string,
+        documentId: string
+    ): () => void {
         const document = doc(this.firestore!, collection, documentId)
 
-        return onSnapshot(document, doc => {
+        return onSnapshot(document, (doc) => {
             const data = Object.assign({}, doc.data())
             for (const key of Object.keys(data)) {
                 if (key.startsWith('__')) delete data[key]
@@ -343,151 +338,125 @@ export default class Retter {
     }
 
     protected async getFirebaseState(config: RetterCloudObjectConfig) {
-        const { projectId } = this.clientConfig!
-        const user = await this.auth!.getCurrentUser()
+        if (!this.clientConfig) throw new Error('Client config not found.')
 
-        const unsubscribers: Unsubscribe[] = []
+        const { projectId } = this.clientConfig
 
-        const queues = {
-            role: new ReplaySubject(1),
-            user: new ReplaySubject(1),
-            public: new ReplaySubject(1),
+        const user = await this.getCurrentUser()
+
+        const unsubscribers: (() => void)[] = []
+
+        const observables = {
+            role: new Observable<any>(() => {}),
+            user: new Observable<any>(() => {}),
+            public: new Observable<any>(() => {}),
         }
+
+        const listenerPrefix = `${projectId}_${config.classId}_${config.instanceId}`
 
         const state = {
             role: {
-                queue: queues.role,
-                subscribe: (observer: any) => {
-                    if (!this.listeners[`${projectId}_${config.classId}_${config.instanceId}_role`]) {
+                observable: observables.role,
+                subscribe: (callback: (data: any) => void) => {
+                    if (!this.listeners[`${listenerPrefix}_role`]) {
                         const listener = this.getFirebaseListener(
-                            queues.role,
+                            observables.role,
                             `/projects/${projectId}/classes/${config.classId}/instances/${config.instanceId}/roleState`,
                             user!.identity!
                         )
-                        unsubscribers.push(listener)
-                        this.listeners[`${projectId}_${config.classId}_${config.instanceId}_role`] = listener
+                        this.listeners[`${listenerPrefix}_role`] = listener
                     }
 
-                    return queues.role.subscribe(observer)
+                    return observables.role.subscribe(callback)
                 },
             },
             user: {
-                queue: queues.user,
-                subscribe: (observer: any) => {
-                    if (!this.listeners[`${projectId}_${config.classId}_${config.instanceId}_user`]) {
+                observable: observables.user,
+                subscribe: (callback: (data: any) => void) => {
+                    if (!this.listeners[`${listenerPrefix}_user`]) {
                         const listener = this.getFirebaseListener(
-                            queues.user,
+                            observables.user,
                             `/projects/${projectId}/classes/${config.classId}/instances/${config.instanceId}/userState`,
                             user!.userId!
                         )
-                        unsubscribers.push(listener)
-                        this.listeners[`${projectId}_${config.classId}_${config.instanceId}_user`] = listener
+                        this.listeners[`${listenerPrefix}_user`] = listener
                     }
 
-                    return queues.user.subscribe(observer)
+                    return observables.user.subscribe(callback)
                 },
             },
             public: {
-                queue: queues.public,
-                subscribe: (observer: any) => {
-                    if (!this.listeners[`${projectId}_${config.classId}_${config.instanceId}_public`]) {
-                        const listener = this.getFirebaseListener(queues.public, `/projects/${projectId}/classes/${config.classId}/instances`, config.instanceId!)
-                        unsubscribers.push(listener)
-                        this.listeners[`${projectId}_${config.classId}_${config.instanceId}_public`] = listener
+                observable: observables.public,
+                subscribe: (callback: (data: any) => void) => {
+                    if (!this.listeners[`${listenerPrefix}_public`]) {
+                        const listener = this.getFirebaseListener(
+                            observables.public,
+                            `/projects/${projectId}/classes/${config.classId}/instances`,
+                            config.instanceId!
+                        )
+                        this.listeners[`${listenerPrefix}_public`] = listener
                     }
-                    return queues.public.subscribe(observer)
+
+                    return observables.public.subscribe(callback)
                 },
             },
         }
 
         return { state, unsubscribers }
     }
+    // #endregion
 
-    protected async clearCloudObjects() {
-        // clear listeners
-        const listeners = Object.values(this.listeners)
-        if (listeners.length > 0) {
-            listeners.map(i => i())
-
-            this.cloudObjects.map(i => {
-                i.state?.role.queue?.complete()
-                i.state?.user.queue?.complete()
-                i.state?.public.queue?.complete()
-            })
-        }
-        this.listeners = {}
-
-        this.cloudObjects.map(i => i.unsubscribers.map(u => u()))
-        this.cloudObjects = []
-
-        if (this.firebaseAuth) await signOut(this.firebaseAuth!)
-        this.clearFirebase()
-    }
-
-    // Public Methods
-    public async authenticateWithCustomToken(token: string): Promise<RetterAuthChangedEvent> {
-        if (!this.initialized) throw new Error('Retter SDK not initialized.')
-
-        return await this.sendToAuthQueue<RetterAuthChangedEvent>({ action: RetterActions.SIGN_IN, data: token })
-    }
-
-    public async signOut(): Promise<void> {
-        if (!this.initialized) throw new Error('Retter SDK not initialized.')
-
-        await this.clearCloudObjects()
-
-        await this.auth!.signOut()
-        await this.auth!.clearTokenData()
-
-        // Fire auth status after all tokens cleared
-        this.fireAuthStatus({})
-    }
-
-    public async getCurrentUser(): Promise<RetterTokenPayload | undefined> {
-        return await this.auth!.getCurrentUser()
-    }
-
-    public async getCloudObject(config: RetterCloudObjectConfig): Promise<RetterCloudObject> {
+    // #region Cloud Object
+    public async getCloudObject(
+        config: RetterCloudObjectConfig
+    ): Promise<RetterCloudObject> {
         if (!this.initialized) throw new Error('Retter SDK not initialized.')
 
         let instance
-        if (config.instanceId && config.useLocal) {
-            await this.sendToActionQueue({ action: RetterActions.EMPTY })
-        } else {
-            let { data } = await this.sendToActionQueue<any>({ action: RetterActions.COS_INSTANCE, data: config })
+        if (!config.instanceId && !config.useLocal) {
+            const { data } = await this.makeAPIRequest<
+                Partial<RetterCloudObject>
+            >(RetterActions.COS_INSTANCE, config)
             instance = data
-            config.instanceId = instance.instanceId
+            config.instanceId = data.instanceId
         }
 
-        const seekedObject = this.cloudObjects.find(r => r.config.classId === config.classId && r.config.instanceId === config.instanceId)
+        const seekedObject = this.cloudObjects.find(
+            (object) =>
+                object.config.classId === config.classId &&
+                object.config.instanceId === config.instanceId
+        )
 
         if (seekedObject) {
-            return {
-                call: seekedObject.call,
-                state: seekedObject.state,
-                listInstances: seekedObject.listInstances,
-                getState: seekedObject.getState,
-                methods: instance?.methods ?? [],
-                instanceId: config.instanceId!,
-                response: seekedObject.response,
-                isNewInstance: false,
-            }
+            return seekedObject
         }
 
-        const { state, unsubscribers } = await this.getFirebaseState(config)
+        const { state } = await this.getFirebaseState(config)
 
-        const call = async <T>(params: RetterCloudObjectCall): Promise<RetterCallResponse<T>> => {
-            params.retryConfig = { ...this.clientConfig!.retryConfig, ...params.retryConfig }
+        const call = async <T>(
+            params: RetterCloudObjectCall
+        ): Promise<RetterCallResponse<T>> => {
+            params.retryConfig = {
+                ...this.clientConfig!.retryConfig,
+                ...params.retryConfig,
+            }
             try {
-                return await this.sendToActionQueue<RetterCallResponse<T>>({
-                    action: RetterActions.COS_CALL,
-                    data: { ...params, classId: config.classId, instanceId: config.instanceId },
+                return await this.makeAPIRequest(RetterActions.COS_CALL, {
+                    ...params,
+                    classId: config.classId,
+                    instanceId: config.instanceId,
                 })
             } catch (error: any) {
                 --params.retryConfig.count!
                 params.retryConfig.delay! *= params.retryConfig.rate!
-                if (error.response && error.response.status === 570 && params.retryConfig.count! > 0) {
-                    await new Promise(r => setTimeout(r, params.retryConfig!.delay!))
+                if (
+                    error.response &&
+                    error.response.status === 570 &&
+                    params.retryConfig.count! > 0
+                ) {
+                    await new Promise((r) =>
+                        setTimeout(r, params.retryConfig!.delay!)
+                    )
                     return await call(params)
                 } else {
                     throw error
@@ -495,18 +464,25 @@ export default class Retter {
             }
         }
 
-        const getState = async (params?: RetterCloudObjectRequest): Promise<RetterCallResponse<RetterCloudObjectState>> => {
-            return await this.sendToActionQueue<RetterCallResponse<RetterCloudObjectState>>({
-                action: RetterActions.COS_STATE,
-                data: { ...params, classId: config.classId, instanceId: config.instanceId },
-            })
+        const getState = async (
+            params?: RetterCloudObjectRequest
+        ): Promise<RetterCallResponse<RetterCloudObjectState>> => {
+            return await this.makeAPIRequest<RetterCloudObjectState>(
+                RetterActions.COS_STATE,
+                {
+                    ...params,
+                    classId: config.classId,
+                    instanceId: config.instanceId,
+                }
+            )
         }
 
-        const listInstances = async (params?: RetterCloudObjectRequest): Promise<string[]> => {
-            const { data } = await this.sendToActionQueue<RetterCallResponse<{ instanceIds: string[] }>>({
-                action: RetterActions.COS_LIST,
-                data: { ...params, classId: config.classId },
-            })
+        const listInstances = async (
+            params?: RetterCloudObjectRequest
+        ): Promise<string[]> => {
+            const { data } = await this.makeAPIRequest<{
+                instanceIds: string[]
+            }>(RetterActions.COS_LIST, { ...params, classId: config.classId })
 
             return data.instanceIds
         }
@@ -519,24 +495,202 @@ export default class Retter {
             methods: instance?.methods ?? [],
             response: instance?.response ?? null,
             instanceId: config.instanceId!,
+            // @ts-ignore
             isNewInstance: instance?.newInstance ?? false,
         }
 
-        this.cloudObjects.push({ ...retVal, config, unsubscribers })
-
+        this.cloudObjects.push({ ...retVal, config, unsubscribers: [] })
         return retVal
     }
 
-    public async makeStaticCall<T>(params: RetterCloudObjectStaticCall): Promise<RetterCallResponse<T>> {
+    protected async clearCloudObjects() {
+        // clear listeners
+        const listeners = Object.values(this.listeners)
+        if (listeners.length > 0) {
+            listeners.map((i) => i())
+
+            this.cloudObjects.map((i) => {
+                i.state?.role.queue?.complete()
+                i.state?.user.queue?.complete()
+                i.state?.public.queue?.complete()
+            })
+        }
+        this.listeners = {}
+
+        this.cloudObjects.map((i) => i.unsubscribers.map((u) => u()))
+        this.cloudObjects = []
+
+        if (this.firebaseAuth) await signOut(this.firebaseAuth!)
+        this.clearFirebase()
+    }
+
+    // #endregion
+
+    // #region Static Call
+    public async makeStaticCall<T>(
+        params: RetterCloudObjectStaticCall
+    ): Promise<RetterCallResponse<T>> {
         if (!this.initialized) throw new Error('Retter SDK not initialized.')
 
-        return await this.sendToActionQueue<RetterCallResponse<T>>({
-            action: RetterActions.COS_STATIC_CALL,
-            data: { ...params, classId: params.classId },
+        return await this.makeAPIRequest<T>(RetterActions.COS_STATIC_CALL, {
+            ...params,
+            classId: params.classId,
         })
     }
 
-    public get authStatus(): Observable<RetterAuthChangedEvent> {
-        return this.authStatusSubject.asObservable().pipe(distinctUntilChanged((a, b) => a.authStatus === b.authStatus && a.identity === b.identity && a.uid === b.uid))
+    // #endregion
+
+    // #region Auth
+    protected async initAuth() {
+        const tokens = await this.getCurrentTokenData()
+        if (tokens) {
+            await this.initFirebase(tokens)
+            this.fireAuthStatusChangedEvent({
+                authStatus: RetterAuthStatus.SIGNED_IN,
+                uid: tokens.accessTokenDecoded?.userId,
+                identity: tokens.accessTokenDecoded?.identity,
+            })
+        } else {
+            this.fireAuthStatusChangedEvent({
+                authStatus: RetterAuthStatus.SIGNED_OUT,
+            })
+        }
     }
+
+    public async authenticateWithCustomToken(
+        token: string
+    ): Promise<RetterAuthChangedEvent> {
+        if (!this.clientConfig) throw new Error('Client config not found.')
+        const { projectId } = this.clientConfig
+
+        const response = await this.axiosInstance!({
+            url: this.buildUrl(projectId, '/TOKEN/auth'),
+            method: 'post',
+            data: { customToken: token },
+        })
+
+        const tokenData = this.formatTokenData(response.data)
+        await this.storeTokenData(tokenData)
+
+        this.clearFirebase()
+        this.clearCloudObjects()
+        await this.initFirebase(tokenData)
+
+        const authEvent = {
+            authStatus: RetterAuthStatus.SIGNED_IN,
+            uid: tokenData.accessTokenDecoded?.userId,
+            identity: tokenData.accessTokenDecoded?.identity,
+        }
+
+        this.fireAuthStatusChangedEvent(authEvent)
+        return authEvent
+    }
+
+    protected async refreshToken(): Promise<RetterTokenData> {
+        if (!this.clientConfig) throw new Error('Client config not found.')
+        const { projectId } = this.clientConfig
+
+        try {
+            const tokens = await this.getCurrentTokenData()
+            const refreshToken = tokens?.refreshToken
+
+            const response = await this.axiosInstance!({
+                url: this.buildUrl(projectId, '/TOKEN/refresh'),
+                method: 'post',
+                data: { refreshToken },
+            })
+
+            const tokenData = this.formatTokenData(response.data)
+            await this.storeTokenData(tokenData)
+            return tokenData
+        } catch (error: any) {
+            const isNetworkError = error.message === 'Network Error'
+            if (!isNetworkError) await this.signOut()
+
+            throw error
+        }
+    }
+
+    public async signOut(): Promise<void> {
+        try {
+            const tokenData = await this.getCurrentTokenData()
+
+            if (tokenData) {
+                const { projectId } = this.clientConfig!
+
+                await this.axiosInstance!({
+                    url: this.buildUrl(projectId, '/TOKEN/signOut'),
+                    method: 'post',
+                    headers: {
+                        Authorization: `Bearer ${tokenData.accessToken}`,
+                    },
+                })
+            }
+        } catch (error) {
+        } finally {
+            this.clearFirebase()
+            await this.clearTokenData()
+            await this.clearCloudObjects()
+            this.fireAuthStatusChangedEvent({
+                authStatus: RetterAuthStatus.SIGNED_OUT,
+            })
+        }
+    }
+
+    public async getCurrentUser(): Promise<RetterTokenPayload | undefined> {
+        const tokenData = await this.getCurrentTokenData()
+
+        return tokenData?.accessTokenDecoded
+    }
+
+    protected async storeTokenData(data: RetterTokenData): Promise<void> {
+        if (typeof data === 'undefined') return
+        await AsyncStorage.setItem(this.tokenStorageKey!, JSON.stringify(data))
+    }
+
+    protected async clearTokenData(): Promise<void> {
+        await AsyncStorage.removeItem(this.tokenStorageKey!)
+    }
+
+    protected formatTokenData(tokenData: RetterTokenData): RetterTokenData {
+        tokenData.accessTokenDecoded = jwtDecode(tokenData.accessToken)
+        tokenData.refreshTokenDecoded = jwtDecode(tokenData.refreshToken)
+
+        if (tokenData.accessTokenDecoded?.iat) {
+            tokenData.diff =
+                tokenData.accessTokenDecoded.iat - Math.floor(Date.now() / 1000)
+        }
+
+        return tokenData
+    }
+
+    protected async getCurrentTokenData(): Promise<
+        RetterTokenData | undefined
+    > {
+        if (!this.tokenStorageKey)
+            throw new Error('Token storage key not found.')
+        const item = await AsyncStorage.getItem(this.tokenStorageKey)
+        if (!item) return undefined
+
+        try {
+            const data = JSON.parse(item)
+            if (data.accessTokenDecoded && data.refreshTokenDecoded) return data
+            data.accessTokenDecoded = jwtDecode(data.accessToken)
+            data.refreshTokenDecoded = jwtDecode(data.refreshToken)
+
+            return data
+        } catch (e) {
+            return undefined
+        }
+    }
+
+    protected fireAuthStatusChangedEvent(event: RetterAuthChangedEvent): void {
+        this.authStatusSubject.next(event)
+    }
+
+    public get authStatus(): Observable<RetterAuthChangedEvent> {
+        return this.authStatusSubject
+    }
+
+    // #endregion
 }

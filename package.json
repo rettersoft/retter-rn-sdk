@@ -1,6 +1,6 @@
 {
     "name": "@retter/rn-sdk",
-    "version": "0.3.16",
+    "version": "0.4.14",
     "description": "React Native Client sdk for retter.io",
     "main": "dist/index.js",
     "types": "dist/index.d.ts",
@@ -24,8 +24,7 @@
         "buffer": "^6.0.3",
         "firebase": "^9.6.2",
         "jwt-decode": "^3.1.2",
-        "rxjs": "6.6.3",
-        "uuid": "^9.0.0"
+        "react-native-uuid": "^2.0.1"
     },
     "scripts": {
         "build": "tsc"
