@@ -1,4 +1,4 @@
-// import AsyncStorage from '@react-native-async-storage/async-storage'
+import AsyncStorage from '@react-native-async-storage/async-storage'
 import { Observable } from './observable'
 import {
     RetterActions,
@@ -32,16 +32,6 @@ export * from './types'
 const DEFAULT_RETRY_DELAY = 50 // in ms
 const DEFAULT_RETRY_COUNT = 3
 const DEFAULT_RETRY_RATE = 1.5
-
-const AsyncStorage: any = {
-    data: {},
-    getItem: async (key: string) => {
-        return AsyncStorage.data[key]
-    },
-    setItem: async (key: string, value: string) => {
-        AsyncStorage.data[key] = value
-    },
-}
 
 const RetterRegions: RetterRegionConfig[] = [
     {
@@ -112,6 +102,10 @@ export default class Retter {
         this.authStatusSubject = new Observable<RetterAuthChangedEvent>(
             () => {}
         )
+
+        this.authStatus.setOnFirstSubscription(() => {
+            this.initAuth()
+        })
 
         this.createAxiosInstance()
         this.initAuth()
@@ -670,6 +664,7 @@ export default class Retter {
         if (!this.tokenStorageKey)
             throw new Error('Token storage key not found.')
         const item = await AsyncStorage.getItem(this.tokenStorageKey)
+
         if (!item) return undefined
 
         try {

@@ -25,6 +25,8 @@ export class Observer<T> {
 export class Observable<T> {
     private observers: Observer<T>[] = []
 
+    private isFirstSubscription = true
+
     constructor(private init: (observer: Observer<T>) => void) {}
 
     subscribe(
@@ -37,6 +39,11 @@ export class Observable<T> {
 
         // Initialize the observer with initial values or events
         this.init(observer)
+
+        if (this.isFirstSubscription) {
+            this.isFirstSubscription = false
+            this.onFirstSubscription()
+        }
 
         return {
             unsubscribe: () => {
@@ -58,6 +65,12 @@ export class Observable<T> {
         this.observers.forEach((observer) => {
             observer.complete()
         })
+    }
+
+    private onFirstSubscription() {}
+
+    public setOnFirstSubscription(onFirstSubscription: () => void) {
+        this.onFirstSubscription = onFirstSubscription
     }
 }
 

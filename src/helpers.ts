@@ -1,16 +1,6 @@
 import { Buffer } from 'buffer'
 import uuid from 'react-native-uuid'
-// import AsyncStorage from '@react-native-async-storage/async-storage'
-
-const AsyncStorage: any = {
-    data: {},
-    getItem: async (key: string) => {
-        return AsyncStorage.data[key]
-    },
-    setItem: async (key: string, value: string) => {
-        AsyncStorage.data[key] = value
-    },
-}
+import AsyncStorage from '@react-native-async-storage/async-storage'
 
 export function base64Encode(str: string): string {
     return Buffer.from(str).toString('base64')
