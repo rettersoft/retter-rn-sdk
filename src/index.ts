@@ -144,10 +144,16 @@ export default class Retter {
             if (this.refreshTokenPromise) {
                 try {
                     const newTokenData = await this.refreshTokenPromise
+                    if (!newTokenData) {
+                        this.fireAuthStatusChangedEvent({
+                            authStatus: RetterAuthStatus.SIGNED_OUT,
+                        })
+                        throw new Error('Access token is undefined.')
+                    }
                     const newData = { ...data }
                     newData.headers = {
                         ...newData.headers,
-                        Authorization: `Bearer ${newTokenData.accessToken}`,
+                        Authorization: `Bearer ${newTokenData}`,
                     }
 
                     return await this.executeRequest(endpoint, newData)
@@ -169,6 +175,12 @@ export default class Retter {
 
             try {
                 const newToken = await this.refreshTokenPromise
+                if (!newToken) {
+                    this.fireAuthStatusChangedEvent({
+                        authStatus: RetterAuthStatus.SIGNED_OUT,
+                    })
+                    throw new Error('Access token is undefined.')
+                }
                 const newData = { ...data }
                 newData.headers = {
                     ...newData.headers,
@@ -180,11 +192,20 @@ export default class Retter {
             }
         } else {
             const newData = { ...data }
-            if (tokens?.accessToken) {
+            if (
+                tokens?.accessToken !== 'undefined' &&
+                tokens?.accessToken !== 'null' &&
+                Boolean(tokens?.accessToken) &&
+                tokens?.accessToken
+            ) {
                 newData.headers = {
                     ...newData.headers,
                     Authorization: `Bearer ${tokens.accessToken}`,
                 }
+            } else {
+                this.fireAuthStatusChangedEvent({
+                    authStatus: RetterAuthStatus.SIGNED_OUT,
+                })
             }
             return await this.executeRequest(endpoint, newData)
         }
@@ -537,7 +558,7 @@ export default class Retter {
     // #region Auth
     protected async initAuth() {
         const tokens = await this.getCurrentTokenData()
-        if (tokens) {
+        if (tokens && tokens.isTokenValid) {
             await this.initFirebase(tokens)
             this.fireAuthStatusChangedEvent({
                 authStatus: RetterAuthStatus.SIGNED_IN,
@@ -655,6 +676,11 @@ export default class Retter {
                 tokenData.accessTokenDecoded.iat - Math.floor(Date.now() / 1000)
         }
 
+        tokenData.isTokenValid =
+            tokenData.accessToken !== 'undefined' &&
+            tokenData.accessToken !== 'null' &&
+            Boolean(tokenData.accessToken)
+
         return tokenData
     }
 
@@ -672,6 +698,11 @@ export default class Retter {
             if (data.accessTokenDecoded && data.refreshTokenDecoded) return data
             data.accessTokenDecoded = jwtDecode(data.accessToken)
             data.refreshTokenDecoded = jwtDecode(data.refreshToken)
+
+            data.isTokenValid =
+                data.accessToken !== 'undefined' &&
+                data.accessToken !== 'null' &&
+                Boolean(data.accessToken)
 
             return data
         } catch (e) {

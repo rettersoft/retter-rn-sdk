@@ -91,6 +91,7 @@ export interface RetterTokenData {
     accessTokenDecoded?: RetterTokenPayload
     refreshTokenDecoded?: RetterTokenPayload
     diff?: number
+    isTokenValid?: boolean
 }
 
 export interface RetterTokenPayload {
