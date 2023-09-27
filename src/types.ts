@@ -1,6 +1,4 @@
 import { AxiosResponse } from 'axios'
-import { Unsubscribe } from '@firebase/util'
-import { ReplaySubject, Subscription } from 'rxjs'
 import { Observable } from './observable'
 
 // Config

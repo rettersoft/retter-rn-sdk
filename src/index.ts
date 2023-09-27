@@ -1,4 +1,4 @@
-// import AsyncStorage from '@react-native-async-storage/async-storage'
+import AsyncStorage from '@react-native-async-storage/async-storage'
 import { Observable } from './observable'
 import {
     RetterActions,
@@ -20,28 +20,17 @@ import {
 } from './types'
 import jwtDecode from 'jwt-decode'
 import { FirebaseApp, initializeApp } from 'firebase/app'
-import { doc, Firestore, onSnapshot } from 'firebase/firestore'
-import { initializeFirestore } from 'firebase/firestore'
+import { doc, Firestore, onSnapshot, initializeFirestore } from 'firebase/firestore'
 import { Auth, getAuth, signInWithCustomToken, signOut } from 'firebase/auth'
 import axios, { AxiosInstance, AxiosRequestConfig } from 'axios'
 import { Agent } from 'https'
-import { base64Encode, getInstallationId, sort } from './helpers'
+import { base64Encode, getInstallationId, isTokenValid, sort } from './helpers'
 
 export * from './types'
 
 const DEFAULT_RETRY_DELAY = 50 // in ms
 const DEFAULT_RETRY_COUNT = 3
 const DEFAULT_RETRY_RATE = 1.5
-
-const AsyncStorage: any = {
-    data: {},
-    getItem: async (key: string) => {
-        return AsyncStorage.data[key]
-    },
-    setItem: async (key: string, value: string) => {
-        AsyncStorage.data[key] = value
-    },
-}
 
 const RetterRegions: RetterRegionConfig[] = [
     {
@@ -109,12 +98,13 @@ export default class Retter {
         if (!this.clientConfig.retryConfig.rate)
             this.clientConfig.retryConfig.rate = DEFAULT_RETRY_RATE
 
-        this.authStatusSubject = new Observable<RetterAuthChangedEvent>(
-            () => {}
-        )
 
         this.createAxiosInstance()
-        this.initAuth()
+        this.authStatusSubject = new Observable<RetterAuthChangedEvent>(
+            () => {
+                this.initAuth()
+            }
+        )
     }
 
     // #region Request
@@ -147,43 +137,55 @@ export default class Retter {
         const accessTokenDecoded = tokens?.accessTokenDecoded
 
         if (accessTokenDecoded && accessTokenDecoded.exp < safeNow) {
-            if (this.refreshTokenPromise) {
-                try {
-                    const newTokenData = await this.refreshTokenPromise
-                    const newData = { ...data }
-                    newData.headers = {
-                        ...newData.headers,
-                        Authorization: `Bearer ${newTokenData.accessToken}`,
-                    }
-
-                    return await this.executeRequest(endpoint, newData)
-                } catch (error) {
-                    throw error
-                }
-            }
-
-            this.refreshTokenPromise = (async () => {
-                try {
-                    const response = await this.refreshToken()
-                    this.refreshTokenPromise = null
-                    return response.accessToken
-                } catch (error) {
-                    this.refreshTokenPromise = null
-                    throw error
-                }
-            })()
-
             try {
-                const newToken = await this.refreshTokenPromise
-                const newData = { ...data }
+                const response = await this.refreshToken();
+                const newData = { ...data };
                 newData.headers = {
                     ...newData.headers,
-                    Authorization: `Bearer ${newToken}`,
+                    Authorization: `Bearer ${response?.accessToken}`,
                 }
                 return await this.executeRequest(endpoint, newData)
-            } catch (error) {
-                throw error
+            } catch (err) {
+                throw err
             }
+
+            // if (this.refreshTokenPromise) {
+            //     try {
+            //         const newTokenData = await this.refreshTokenPromise
+            //         const newData = { ...data }
+            //         newData.headers = {
+            //             ...newData.headers,
+            //             Authorization: `Bearer ${newTokenData.accessToken}`,
+            //         }
+
+            //         return await this.executeRequest(endpoint, newData)
+            //     } catch (error) {
+            //         throw error
+            //     }
+            // }
+
+            // this.refreshTokenPromise = (async () => {
+            //     try {
+            //         const response = await this.refreshToken()
+            //         this.refreshTokenPromise = null
+            //         return response.accessToken
+            //     } catch (error) {
+            //         this.refreshTokenPromise = null
+            //         throw error
+            //     }
+            // })()
+
+            // try {
+            //     const newToken = await this.refreshTokenPromise
+            //     const newData = { ...data }
+            //     newData.headers = {
+            //         ...newData.headers,
+            //         Authorization: `Bearer ${newToken}`,
+            //     }
+            //     return await this.executeRequest(endpoint, newData)
+            // } catch (error) {
+            //     throw error
+            // }
         } else {
             const newData = { ...data }
             if (tokens?.accessToken) {
@@ -191,6 +193,10 @@ export default class Retter {
                     ...newData.headers,
                     Authorization: `Bearer ${tokens.accessToken}`,
                 }
+            } else {
+                this.fireAuthStatusChangedEvent({
+                    authStatus: RetterAuthStatus.SIGNED_OUT,
+                })
             }
             return await this.executeRequest(endpoint, newData)
         }
@@ -292,27 +298,39 @@ export default class Retter {
 
     // #region Firebase
     protected async initFirebase(tokenData?: RetterTokenData) {
-        const firebaseConfig = tokenData?.firebase
-        if (!firebaseConfig || this.firebase) return
+        try {
+            const firebaseConfig = tokenData?.firebase
+            if (!firebaseConfig || this.firebase) return
+    
+            this.firebase = initializeApp(
+                {
+                    apiKey: firebaseConfig.apiKey,
+                    authDomain: firebaseConfig.projectId + '.firebaseapp.com',
+                    projectId: firebaseConfig.projectId,
+                },
+                this.clientConfig!.projectId
+            )
 
-        this.firebase = initializeApp(
-            {
-                apiKey: firebaseConfig.apiKey,
-                authDomain: firebaseConfig.projectId + '.firebaseapp.com',
-                projectId: firebaseConfig.projectId,
-            },
-            this.clientConfig!.projectId
-        )
+            this.initFirestore(this.firebase!);
+            this.firebaseAuth = getAuth(this.firebase!)
+    
+            const firebaseCustomToken = await signInWithCustomToken(
+                this.firebaseAuth!,
+                firebaseConfig.customToken
+            );
+            return firebaseCustomToken;
+        } catch (err) {
+            return undefined;
+        }
+        
+    }
 
-        this.firestore = initializeFirestore(this.firebase!, {
-            experimentalForceLongPolling: true,
-        })
-        this.firebaseAuth = getAuth(this.firebase!)
-
-        await signInWithCustomToken(
-            this.firebaseAuth!,
-            firebaseConfig.customToken
-        ).catch(() => {})
+    protected async initFirestore(firebaseApp: FirebaseApp) {
+        try {
+            this.firestore = initializeFirestore(firebaseApp!, {
+                experimentalForceLongPolling: true,
+            })  
+        } catch (err) {}
     }
 
     protected clearFirebase() {
@@ -544,12 +562,18 @@ export default class Retter {
     protected async initAuth() {
         const tokens = await this.getCurrentTokenData()
         if (tokens) {
-            await this.initFirebase(tokens)
-            this.fireAuthStatusChangedEvent({
-                authStatus: RetterAuthStatus.SIGNED_IN,
-                uid: tokens.accessTokenDecoded?.userId,
-                identity: tokens.accessTokenDecoded?.identity,
-            })
+            const initFirebaseResp = await this.initFirebase(tokens)
+            if (initFirebaseResp) {
+                this.fireAuthStatusChangedEvent({
+                    authStatus: RetterAuthStatus.SIGNED_IN,
+                    uid: tokens.accessTokenDecoded?.userId,
+                    identity: tokens.accessTokenDecoded?.identity,
+                })
+            } else {
+                this.fireAuthStatusChangedEvent({
+                    authStatus: RetterAuthStatus.SIGNED_OUT,
+                })
+            }
         } else {
             this.fireAuthStatusChangedEvent({
                 authStatus: RetterAuthStatus.SIGNED_OUT,
@@ -674,11 +698,17 @@ export default class Retter {
 
         try {
             const data = JSON.parse(item)
-            if (data.accessTokenDecoded && data.refreshTokenDecoded) return data
-            data.accessTokenDecoded = jwtDecode(data.accessToken)
-            data.refreshTokenDecoded = jwtDecode(data.refreshToken)
 
-            return data
+            if (data.accessTokenDecoded && data.refreshTokenDecoded) {
+                return data
+            } else if (isTokenValid(data.accessToken) && isTokenValid(data.refreshToken)) {
+                data.accessTokenDecoded = jwtDecode(data.accessToken)
+                data.refreshTokenDecoded = jwtDecode(data.refreshToken)
+    
+                return data
+            } else {
+                return undefined
+            }
         } catch (e) {
             return undefined
         }
