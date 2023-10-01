@@ -148,44 +148,6 @@ export default class Retter {
             } catch (err) {
                 throw err
             }
-
-            // if (this.refreshTokenPromise) {
-            //     try {
-            //         const newTokenData = await this.refreshTokenPromise
-            //         const newData = { ...data }
-            //         newData.headers = {
-            //             ...newData.headers,
-            //             Authorization: `Bearer ${newTokenData.accessToken}`,
-            //         }
-
-            //         return await this.executeRequest(endpoint, newData)
-            //     } catch (error) {
-            //         throw error
-            //     }
-            // }
-
-            // this.refreshTokenPromise = (async () => {
-            //     try {
-            //         const response = await this.refreshToken()
-            //         this.refreshTokenPromise = null
-            //         return response.accessToken
-            //     } catch (error) {
-            //         this.refreshTokenPromise = null
-            //         throw error
-            //     }
-            // })()
-
-            // try {
-            //     const newToken = await this.refreshTokenPromise
-            //     const newData = { ...data }
-            //     newData.headers = {
-            //         ...newData.headers,
-            //         Authorization: `Bearer ${newToken}`,
-            //     }
-            //     return await this.executeRequest(endpoint, newData)
-            // } catch (error) {
-            //     throw error
-            // }
         } else {
             const newData = { ...data }
             if (tokens?.accessToken) {
@@ -320,7 +282,7 @@ export default class Retter {
             );
             return firebaseCustomToken;
         } catch (err) {
-            return undefined;
+            return err;
         }
         
     }
@@ -562,18 +524,13 @@ export default class Retter {
     protected async initAuth() {
         const tokens = await this.getCurrentTokenData()
         if (tokens) {
-            const initFirebaseResp = await this.initFirebase(tokens)
-            if (initFirebaseResp) {
-                this.fireAuthStatusChangedEvent({
-                    authStatus: RetterAuthStatus.SIGNED_IN,
-                    uid: tokens.accessTokenDecoded?.userId,
-                    identity: tokens.accessTokenDecoded?.identity,
-                })
-            } else {
-                this.fireAuthStatusChangedEvent({
-                    authStatus: RetterAuthStatus.SIGNED_OUT,
-                })
-            }
+            await this.initFirebase(tokens)
+            
+            this.fireAuthStatusChangedEvent({
+                authStatus: RetterAuthStatus.SIGNED_IN,
+                uid: tokens.accessTokenDecoded?.userId,
+                identity: tokens.accessTokenDecoded?.identity,
+            })
         } else {
             this.fireAuthStatusChangedEvent({
                 authStatus: RetterAuthStatus.SIGNED_OUT,
