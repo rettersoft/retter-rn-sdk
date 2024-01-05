@@ -1,6 +1,6 @@
 {
     "name": "@retter/rn-sdk",
-    "version": "0.4.27",
+    "version": "0.5.0",
     "description": "React Native Client sdk for retter.io",
     "main": "dist/index.js",
     "types": "dist/index.d.ts",

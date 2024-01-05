@@ -20,7 +20,12 @@ import {
 } from './types'
 import jwtDecode from 'jwt-decode'
 import { FirebaseApp, initializeApp } from 'firebase/app'
-import { doc, Firestore, onSnapshot, initializeFirestore } from 'firebase/firestore'
+import {
+    doc,
+    Firestore,
+    onSnapshot,
+    initializeFirestore,
+} from 'firebase/firestore'
 import { Auth, getAuth, signInWithCustomToken, signOut } from 'firebase/auth'
 import axios, { AxiosInstance, AxiosRequestConfig } from 'axios'
 import { Agent } from 'https'
@@ -98,13 +103,10 @@ export default class Retter {
         if (!this.clientConfig.retryConfig.rate)
             this.clientConfig.retryConfig.rate = DEFAULT_RETRY_RATE
 
-
         this.createAxiosInstance()
-        this.authStatusSubject = new Observable<RetterAuthChangedEvent>(
-            () => {
-                this.initAuth()
-            }
-        )
+        this.authStatusSubject = new Observable<RetterAuthChangedEvent>(() => {
+            this.initAuth()
+        })
     }
 
     // #region Request
@@ -138,8 +140,8 @@ export default class Retter {
 
         if (accessTokenDecoded && accessTokenDecoded.exp < safeNow) {
             try {
-                const response = await this.refreshToken();
-                const newData = { ...data };
+                const response = await this.refreshToken()
+                const newData = { ...data }
                 newData.headers = {
                     ...newData.headers,
                     Authorization: `Bearer ${response?.accessToken}`,
@@ -196,6 +198,14 @@ export default class Retter {
                     resolve(response)
                 })
                 .catch((error) => {
+                    if (
+                        error.response &&
+                        error.response.status === 403 &&
+                        error.response.data &&
+                        error.response.data.code === 'ACCESS_DENIED'
+                    ) {
+                        this.signOut()
+                    }
                     reject(error)
                 })
         })
@@ -263,7 +273,7 @@ export default class Retter {
         try {
             const firebaseConfig = tokenData?.firebase
             if (!firebaseConfig || this.firebase) return
-    
+
             this.firebase = initializeApp(
                 {
                     apiKey: firebaseConfig.apiKey,
@@ -273,25 +283,24 @@ export default class Retter {
                 this.clientConfig!.projectId
             )
 
-            this.initFirestore(this.firebase!);
+            this.initFirestore(this.firebase!)
             this.firebaseAuth = getAuth(this.firebase!)
-    
+
             const firebaseCustomToken = await signInWithCustomToken(
                 this.firebaseAuth!,
                 firebaseConfig.customToken
-            );
-            return firebaseCustomToken;
+            )
+            return firebaseCustomToken
         } catch (err) {
-            return err;
+            return err
         }
-        
     }
 
     protected async initFirestore(firebaseApp: FirebaseApp) {
         try {
             this.firestore = initializeFirestore(firebaseApp!, {
                 experimentalForceLongPolling: true,
-            })  
+            })
         } catch (err) {}
     }
 
@@ -525,7 +534,7 @@ export default class Retter {
         const tokens = await this.getCurrentTokenData()
         if (tokens) {
             await this.initFirebase(tokens)
-            
+
             this.fireAuthStatusChangedEvent({
                 authStatus: RetterAuthStatus.SIGNED_IN,
                 uid: tokens.accessTokenDecoded?.userId,
@@ -658,10 +667,13 @@ export default class Retter {
 
             if (data.accessTokenDecoded && data.refreshTokenDecoded) {
                 return data
-            } else if (isTokenValid(data.accessToken) && isTokenValid(data.refreshToken)) {
+            } else if (
+                isTokenValid(data.accessToken) &&
+                isTokenValid(data.refreshToken)
+            ) {
                 data.accessTokenDecoded = jwtDecode(data.accessToken)
                 data.refreshTokenDecoded = jwtDecode(data.refreshToken)
-    
+
                 return data
             } else {
                 return undefined
