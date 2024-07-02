@@ -137,20 +137,70 @@ export default class Retter {
         const accessTokenDecoded = tokens?.accessTokenDecoded
 
         if (accessTokenDecoded && accessTokenDecoded.exp < safeNow) {
+            if (this.refreshTokenPromise) {
+                try {
+                    const newTokenData = await this.refreshTokenPromise
+                    if (!newTokenData) {
+                        this.fireAuthStatusChangedEvent({
+                            authStatus: RetterAuthStatus.SIGNED_OUT,
+                        })
+                        throw new Error('Access token is undefined.')
+                    }
+                    const newData = { ...data }
+                    newData.headers = {
+                        ...newData.headers,
+                        Authorization: `Bearer ${newTokenData}`,
+                    }
+
+                    return await this.executeRequest(endpoint, newData)
+                } catch (error) {
+                    throw error
+                }
+            }
+            this.refreshTokenPromise = (async () => {
+                try {
+                    const response = await this.refreshToken()
+                    this.refreshTokenPromise = null
+                    return response.accessToken
+                } catch (error) {
+                    this.refreshTokenPromise = null
+                    throw error
+                }
+            })()
+
             try {
-                const response = await this.refreshToken();
-                const newData = { ...data };
+                const newToken = await this.refreshTokenPromise
+                if (!newToken) {
+                    this.fireAuthStatusChangedEvent({
+                        authStatus: RetterAuthStatus.SIGNED_OUT,
+                    })
+                    throw new Error('Access token is undefined.')
+                }
+                const newData = { ...data }
                 newData.headers = {
                     ...newData.headers,
-                    Authorization: `Bearer ${response?.accessToken}`,
+                    Authorization: `Bearer ${newToken}`,
                 }
                 return await this.executeRequest(endpoint, newData)
-            } catch (err) {
-                throw err
+            } catch (error) {
+                throw error
             }
+
+
+            // try {
+            //     const response = await this.refreshToken();
+            //     const newData = { ...data };
+            //     newData.headers = {
+            //         ...newData.headers,
+            //         Authorization: `Bearer ${response?.accessToken}`,
+            //     }
+            //     return await this.executeRequest(endpoint, newData)
+            // } catch (err) {
+            //     throw err
+            // }
         } else {
             const newData = { ...data }
-            if (tokens?.accessToken) {
+            if (tokens?.accessToken !== 'undefined' && tokens?.accessToken !== 'null' && tokens?.accessToken) {
                 newData.headers = {
                     ...newData.headers,
                     Authorization: `Bearer ${tokens.accessToken}`,
@@ -196,6 +246,14 @@ export default class Retter {
                     resolve(response)
                 })
                 .catch((error) => {
+                    // if (
+                    //     error.response &&
+                    //     error.response.status === 403 &&
+                    //     error.response.data &&
+                    //     error.response.data.code === 'ACCESS_DENIED'
+                    // ) {
+                    //     this.signOut()
+                    // }
                     reject(error)
                 })
         })
@@ -585,9 +643,10 @@ export default class Retter {
             await this.storeTokenData(tokenData)
             return tokenData
         } catch (error: any) {
-            const isNetworkError = error.message === 'Network Error'
-            if (!isNetworkError) await this.signOut()
-
+            const isRioError = error.message.includes("Unexpected error occured in TOKEN")
+            if (isRioError) await this.signOut();
+            // const isNetworkError = error.message === 'Network Error'
+            // if (!isNetworkError) await this.signOut()
             throw error
         }
     }
@@ -656,16 +715,22 @@ export default class Retter {
         try {
             const data = JSON.parse(item)
 
-            if (data.accessTokenDecoded && data.refreshTokenDecoded) {
-                return data
-            } else if (isTokenValid(data.accessToken) && isTokenValid(data.refreshToken)) {
-                data.accessTokenDecoded = jwtDecode(data.accessToken)
-                data.refreshTokenDecoded = jwtDecode(data.refreshToken)
+            if (data.accessTokenDecoded && data.refreshTokenDecoded) return data;
+
+            data.accessTokenDecoded = jwtDecode(data.accessToken)
+            data.refreshTokenDecoded = jwtDecode(data.refreshToken)
+            return data
+
+            // if (data.accessTokenDecoded && data.refreshTokenDecoded) {
+            //     return data
+            // } else if (isTokenValid(data.accessToken) && isTokenValid(data.refreshToken)) {
+            //     data.accessTokenDecoded = jwtDecode(data.accessToken)
+            //     data.refreshTokenDecoded = jwtDecode(data.refreshToken)
     
-                return data
-            } else {
-                return undefined
-            }
+            //     return data
+            // } else {
+            //     return undefined
+            // }
         } catch (e) {
             return undefined
         }
