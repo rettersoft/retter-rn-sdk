@@ -644,9 +644,14 @@ export default class Retter {
             return tokenData
         } catch (error: any) {
             const isRioError = error.message.includes("Unexpected error occured in TOKEN")
-            if (isRioError) await this.signOut();
-            // const isNetworkError = error.message === 'Network Error'
-            // if (!isNetworkError) await this.signOut()
+            if (isRioError) {
+                await this.signOut();
+            } else {
+                const authEvent = {
+                    authStatus: RetterAuthStatus.CONNECTION_FAILED,
+                }
+                this.fireAuthStatusChangedEvent(authEvent)
+            }
             throw error
         }
     }
