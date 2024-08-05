@@ -632,11 +632,12 @@ export default class Retter {
         try {
             const tokens = await this.getCurrentTokenData()
             const refreshToken = tokens?.refreshToken
+            const accessToken = tokens?.accessToken
 
             const response = await this.axiosInstance!({
                 url: this.buildUrl(projectId, '/TOKEN/refresh'),
                 method: 'post',
-                data: { refreshToken },
+                data: { refreshToken, accessToken },
             })
 
             const tokenData = this.formatTokenData(response.data)
