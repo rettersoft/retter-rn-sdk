@@ -143,6 +143,7 @@ export default class Retter {
                     if (!newTokenData) {
                         this.fireAuthStatusChangedEvent({
                             authStatus: RetterAuthStatus.SIGNED_OUT,
+                            message: 'Already have refreshTokenPromise => tokenData is undefined',
                         })
                         throw new Error('Access token is undefined.')
                     }
@@ -173,6 +174,7 @@ export default class Retter {
                 if (!newToken) {
                     this.fireAuthStatusChangedEvent({
                         authStatus: RetterAuthStatus.SIGNED_OUT,
+                        message: 'First time refreshTokenPromise => tokenData is undefined',
                     })
                     throw new Error('Access token is undefined.')
                 }
@@ -208,6 +210,7 @@ export default class Retter {
             } else {
                 this.fireAuthStatusChangedEvent({
                     authStatus: RetterAuthStatus.SIGNED_OUT,
+                    message: 'Access token is undefined',
                 })
             }
             return await this.executeRequest(endpoint, newData)
@@ -592,6 +595,7 @@ export default class Retter {
         } else {
             this.fireAuthStatusChangedEvent({
                 authStatus: RetterAuthStatus.SIGNED_OUT,
+                message: 'First Init access token is undefined',
             })
         }
     }
@@ -646,10 +650,11 @@ export default class Retter {
         } catch (error: any) {
             const isRioError = error.message.includes("Unexpected error occured in TOKEN")
             if (isRioError) {
-                await this.signOut();
+                await this.signOut(error.message);
             } else {
                 const authEvent = {
                     authStatus: RetterAuthStatus.CONNECTION_FAILED,
+                    message: error.message ?? 'Connection Failed',
                 }
                 this.fireAuthStatusChangedEvent(authEvent)
             }
@@ -657,7 +662,7 @@ export default class Retter {
         }
     }
 
-    public async signOut(): Promise<void> {
+    public async signOut(message?: string): Promise<void> {
         try {
             const tokenData = await this.getCurrentTokenData()
 
@@ -679,6 +684,7 @@ export default class Retter {
             await this.clearCloudObjects()
             this.fireAuthStatusChangedEvent({
                 authStatus: RetterAuthStatus.SIGNED_OUT,
+                message: message ?? 'Refresh token failed',
             })
         }
     }
