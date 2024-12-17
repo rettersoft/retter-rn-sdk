@@ -23,7 +23,7 @@ import { FirebaseApp, initializeApp } from 'firebase/app'
 import { doc, Firestore, onSnapshot, initializeFirestore } from 'firebase/firestore'
 import { Auth, getAuth, signInWithCustomToken, signOut } from 'firebase/auth'
 import axios, { AxiosInstance, AxiosRequestConfig } from 'axios'
-import { Agent } from 'https'
+// import { Agent } from 'https'
 import { base64Encode, getInstallationId, isTokenValid, sort } from './helpers'
 
 export * from './types'
@@ -119,7 +119,7 @@ export default class Retter {
         }
 
         if (this.sslPinningEnabled === false) {
-            axiosConfig.httpsAgent = new Agent({ rejectUnauthorized: false })
+            // axiosConfig.httpsAgent = new Agent({ rejectUnauthorized: false })
         }
 
         this.axiosInstance! = axios.create(axiosConfig)
