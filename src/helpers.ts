@@ -2,6 +2,11 @@ import { Buffer } from 'buffer'
 import uuid from 'react-native-uuid'
 import AsyncStorage from '@react-native-async-storage/async-storage'
 
+// AsyncStorage'ın mevcut olup olmadığını kontrol et
+if (!AsyncStorage) {
+    throw new Error('@react-native-async-storage/async-storage is required but not installed. Please install it in your React Native project.')
+}
+
 export function base64Encode(str: string): string {
     return Buffer.from(str).toString('base64')
 }
@@ -34,12 +39,10 @@ export async function getInstallationId() {
     try {
         const id = await AsyncStorage.getItem('RIO_INSTALLATION_ID')
         if (id) return id
-    
         const newId = uuid.v4().toString()
         await AsyncStorage.setItem('RIO_INSTALLATION_ID', newId)
         return newId
     } catch (err) {
         return '';
     }
-    
 }

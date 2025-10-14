@@ -19,9 +19,8 @@ import {
     RetterTokenPayload,
 } from './types'
 import jwtDecode from 'jwt-decode'
-import { FirebaseApp, initializeApp } from 'firebase/app'
-import { doc, Firestore, onSnapshot, initializeFirestore } from 'firebase/firestore'
-import { Auth, getAuth, signInWithCustomToken, signOut } from 'firebase/auth'
+import firestore, { getFirestore, collection, doc, onSnapshot } from '@react-native-firebase/firestore'
+import auth, { getAuth, signInWithCustomToken, signOut } from '@react-native-firebase/auth'
 import axios, { AxiosInstance, AxiosRequestConfig } from 'axios'
 // import { Agent } from 'https'
 import { base64Encode, getInstallationId, isTokenValid, sort } from './helpers'
@@ -57,12 +56,6 @@ export default class Retter {
     private tokenStorageKey?: string
 
     private authStatusSubject: Observable<RetterAuthChangedEvent>
-
-    private firebase?: FirebaseApp
-
-    private firestore?: Firestore
-
-    private firebaseAuth?: Auth
 
     private refreshTokenPromise: Promise<any> | null = null
 
@@ -127,94 +120,105 @@ export default class Retter {
 
     protected async makeAPIRequest<T>(
         action: RetterActions,
-        data: RetterCloudObjectConfig
+        data: RetterCloudObjectConfig,
+        retryCount: number = 0
     ): Promise<RetterCallResponse<T>> {
-        const endpoint = this.generateEndpoint(action, data)
-        const tokens = await this.getCurrentTokenData()
+        try {
+            const endpoint = this.generateEndpoint(action, data)
+            const tokens = await this.getCurrentTokenData()
 
-        const now = Math.floor(Date.now() / 1000)
-        const safeNow = now + 30 + (tokens?.diff ?? 0) // add server time diff
-        const accessTokenDecoded = tokens?.accessTokenDecoded
+            const now = Math.floor(Date.now() / 1000)
+            const safeNow = now + 30 + (tokens?.diff ?? 0) // add server time diff
+            const accessTokenDecoded = tokens?.accessTokenDecoded
 
-        if (accessTokenDecoded && accessTokenDecoded.exp < safeNow) {
-            if (this.refreshTokenPromise) {
+            if (accessTokenDecoded && accessTokenDecoded.exp < safeNow) {
+                if (this.refreshTokenPromise) {
+                    try {
+                        const newTokenData = await this.refreshTokenPromise
+                        if (!newTokenData) {
+                            this.fireAuthStatusChangedEvent({
+                                authStatus: RetterAuthStatus.SIGNED_OUT,
+                                message: 'Already have refreshTokenPromise => tokenData is undefined',
+                            })
+                            throw new Error('Access token is undefined.')
+                        }
+                        const newData = { ...data }
+                        newData.headers = {
+                            ...newData.headers,
+                            Authorization: `Bearer ${newTokenData}`,
+                        }
+
+                        return await this.executeRequest(endpoint, newData)
+                    } catch (error) {
+                        throw error
+                    }
+                }
+                this.refreshTokenPromise = (async () => {
+                    try {
+                        const response = await this.refreshToken()
+                        this.refreshTokenPromise = null
+                        return response.accessToken
+                    } catch (error) {
+                        this.refreshTokenPromise = null
+                        throw error
+                    }
+                })()
+
                 try {
-                    const newTokenData = await this.refreshTokenPromise
-                    if (!newTokenData) {
+                    const newToken = await this.refreshTokenPromise
+                    if (!newToken) {
                         this.fireAuthStatusChangedEvent({
                             authStatus: RetterAuthStatus.SIGNED_OUT,
-                            message: 'Already have refreshTokenPromise => tokenData is undefined',
+                            message: 'First time refreshTokenPromise => tokenData is undefined',
                         })
                         throw new Error('Access token is undefined.')
                     }
                     const newData = { ...data }
                     newData.headers = {
                         ...newData.headers,
-                        Authorization: `Bearer ${newTokenData}`,
+                        Authorization: `Bearer ${newToken}`,
                     }
-
                     return await this.executeRequest(endpoint, newData)
                 } catch (error) {
                     throw error
                 }
-            }
-            this.refreshTokenPromise = (async () => {
-                try {
-                    const response = await this.refreshToken()
-                    this.refreshTokenPromise = null
-                    return response.accessToken
-                } catch (error) {
-                    this.refreshTokenPromise = null
-                    throw error
-                }
-            })()
 
-            try {
-                const newToken = await this.refreshTokenPromise
-                if (!newToken) {
+
+                // try {
+                //     const response = await this.refreshToken();
+                //     const newData = { ...data };
+                //     newData.headers = {
+                //         ...newData.headers,
+                //         Authorization: `Bearer ${response?.accessToken}`,
+                //     }
+                //     return await this.executeRequest(endpoint, newData)
+                // } catch (err) {
+                //     throw err
+                // }
+            } else {
+                const newData = { ...data }
+                if (tokens?.accessToken !== 'undefined' && tokens?.accessToken !== 'null' && tokens?.accessToken) {
+                    newData.headers = {
+                        ...newData.headers,
+                        Authorization: `Bearer ${tokens.accessToken}`,
+                    }
+                } else {
                     this.fireAuthStatusChangedEvent({
                         authStatus: RetterAuthStatus.SIGNED_OUT,
-                        message: 'First time refreshTokenPromise => tokenData is undefined',
+                        message: 'Access token is undefined',
                     })
-                    throw new Error('Access token is undefined.')
-                }
-                const newData = { ...data }
-                newData.headers = {
-                    ...newData.headers,
-                    Authorization: `Bearer ${newToken}`,
                 }
                 return await this.executeRequest(endpoint, newData)
-            } catch (error) {
-                throw error
             }
-
-
-            // try {
-            //     const response = await this.refreshToken();
-            //     const newData = { ...data };
-            //     newData.headers = {
-            //         ...newData.headers,
-            //         Authorization: `Bearer ${response?.accessToken}`,
-            //     }
-            //     return await this.executeRequest(endpoint, newData)
-            // } catch (err) {
-            //     throw err
-            // }
-        } else {
-            const newData = { ...data }
-            if (tokens?.accessToken !== 'undefined' && tokens?.accessToken !== 'null' && tokens?.accessToken) {
-                newData.headers = {
-                    ...newData.headers,
-                    Authorization: `Bearer ${tokens.accessToken}`,
-                }
-            } else {
-                this.fireAuthStatusChangedEvent({
-                    authStatus: RetterAuthStatus.SIGNED_OUT,
-                    message: 'Access token is undefined',
-                })
+        } catch (error) {
+            if (this.isRetryableError(error) && retryCount < 3) {
+                const delay = Math.min(1000 * Math.pow(2, retryCount), 5000) // Exponential backoff, max 5s
+                await new Promise(resolve => setTimeout(resolve, delay))
+                return this.makeAPIRequest(action, data, retryCount + 1)
             }
-            return await this.executeRequest(endpoint, newData)
+            throw error
         }
+
     }
 
     protected async executeRequest(
@@ -308,11 +312,10 @@ export default class Retter {
     protected buildUrl(projectId: string, path: string) {
         const prefix = this.clientConfig?.url
             ? `${this.clientConfig.url}`
-            : `${projectId}.${
-                  RetterRegions.find(
-                      (region) => region.id === this.clientConfig?.region
-                  )?.url
-              }`
+            : `${projectId}.${RetterRegions.find(
+                (region) => region.id === this.clientConfig?.region
+            )?.url
+            }`
 
         return `https://${prefix}/${this.clientConfig?.projectId}${path}`
     }
@@ -323,53 +326,34 @@ export default class Retter {
     protected async initFirebase(tokenData?: RetterTokenData) {
         try {
             const firebaseConfig = tokenData?.firebase
-            if (!firebaseConfig || this.firebase) return
-    
-            this.firebase = initializeApp(
-                {
-                    apiKey: firebaseConfig.apiKey,
-                    authDomain: firebaseConfig.projectId + '.firebaseapp.com',
-                    projectId: firebaseConfig.projectId,
-                },
-                this.clientConfig!.projectId
-            )
+            if (!firebaseConfig) return
 
-            this.initFirestore(this.firebase!);
-            this.firebaseAuth = getAuth(this.firebase!)
-    
-            const firebaseCustomToken = await signInWithCustomToken(
-                this.firebaseAuth!,
-                firebaseConfig.customToken
-            );
+            // Sign in with custom token using React Native Firebase
+            const authInstance = getAuth()
+            const firebaseCustomToken = await signInWithCustomToken(authInstance, firebaseConfig.customToken);
             return firebaseCustomToken;
         } catch (err) {
+            console.error('Firebase initialization error', err)
             return err;
         }
-        
-    }
-
-    protected async initFirestore(firebaseApp: FirebaseApp) {
-        try {
-            this.firestore = initializeFirestore(firebaseApp!, {
-                experimentalForceLongPolling: true,
-            })  
-        } catch (err) {}
     }
 
     protected clearFirebase() {
-        this.firebase = undefined
-        this.firestore = undefined
-        this.firebaseAuth = undefined
+        // React Native Firebase doesn't need explicit cleanup like web SDK
+        // The auth and firestore instances are managed globally
     }
 
     protected getFirebaseListener(
         queue: any,
-        collection: string,
+        collectionPath: string,
         documentId: string
     ): () => void {
-        const document = doc(this.firestore!, collection, documentId)
+        // Remove leading slash from collection path if present
+        const cleanCollection = collectionPath.startsWith('/') ? collectionPath.slice(1) : collectionPath
+        const db = getFirestore()
+        const documentRef = doc(db, cleanCollection, documentId)
 
-        return onSnapshot(document, (doc) => {
+        return onSnapshot(documentRef, (doc: any) => {
             const data = Object.assign({}, doc.data())
             for (const key of Object.keys(data)) {
                 if (key.startsWith('__')) delete data[key]
@@ -388,9 +372,9 @@ export default class Retter {
         const unsubscribers: (() => void)[] = []
 
         const observables = {
-            role: new Observable<any>(() => {}),
-            user: new Observable<any>(() => {}),
-            public: new Observable<any>(() => {}),
+            role: new Observable<any>(() => { }),
+            user: new Observable<any>(() => { }),
+            public: new Observable<any>(() => { }),
         }
 
         const listenerPrefix = `${projectId}_${config.classId}_${config.instanceId}`
@@ -402,7 +386,7 @@ export default class Retter {
                     if (!this.listeners[`${listenerPrefix}_role`]) {
                         const listener = this.getFirebaseListener(
                             observables.role,
-                            `/projects/${projectId}/classes/${config.classId}/instances/${config.instanceId}/roleState`,
+                            `projects/${projectId}/classes/${config.classId}/instances/${config.instanceId}/roleState`,
                             user!.identity!
                         )
                         this.listeners[`${listenerPrefix}_role`] = listener
@@ -417,7 +401,7 @@ export default class Retter {
                     if (!this.listeners[`${listenerPrefix}_user`]) {
                         const listener = this.getFirebaseListener(
                             observables.user,
-                            `/projects/${projectId}/classes/${config.classId}/instances/${config.instanceId}/userState`,
+                            `projects/${projectId}/classes/${config.classId}/instances/${config.instanceId}/userState`,
                             user!.userId!
                         )
                         this.listeners[`${listenerPrefix}_user`] = listener
@@ -432,7 +416,7 @@ export default class Retter {
                     if (!this.listeners[`${listenerPrefix}_public`]) {
                         const listener = this.getFirebaseListener(
                             observables.public,
-                            `/projects/${projectId}/classes/${config.classId}/instances`,
+                            `projects/${projectId}/classes/${config.classId}/instances`,
                             config.instanceId!
                         )
                         this.listeners[`${listenerPrefix}_public`] = listener
@@ -561,11 +545,44 @@ export default class Retter {
         this.cloudObjects.map((i) => i.unsubscribers.map((u) => u()))
         this.cloudObjects = []
 
-        if (this.firebaseAuth) await signOut(this.firebaseAuth!)
+        const authInstance = getAuth()
+        await signOut(authInstance)
         this.clearFirebase()
     }
 
     // #endregion
+
+
+    private isNetworkError(error: any): boolean {
+        return error.code === 'NETWORK_ERROR' ||
+            error.code === 'ECONNABORTED' ||
+            error.code === 'ENOTFOUND' ||
+            error.code === 'ECONNREFUSED' ||
+            error.message?.includes('Network Error') ||
+            error.message?.includes('timeout')
+    }
+
+    private isAuthError(error: any): boolean {
+        return error.message?.includes("Unexpected error occured in TOKEN") ||
+            (error.response && error.response.status === 401) ||
+            (error.response && error.response.status === 403) ||
+            error.message?.includes('ACCESS_DENIED')
+    }
+
+    private isServerError(error: any): boolean {
+        return error.response && error.response.status >= 500
+    }
+
+    private isRetryableError(error: any): boolean {
+        return this.isNetworkError(error) ||
+            this.isServerError(error) ||
+            (error.response && error.response.status === 429) || // Rate limit
+            (error.response && error.response.status === 503) || // Service unavailable
+            (error.response && error.response.status === 502)    // Bad gateway
+    }
+
+
+
 
     // #region Static Call
     public async makeStaticCall<T>(
@@ -586,7 +603,7 @@ export default class Retter {
         const tokens = await this.getCurrentTokenData()
         if (tokens) {
             await this.initFirebase(tokens)
-            
+
             this.fireAuthStatusChangedEvent({
                 authStatus: RetterAuthStatus.SIGNED_IN,
                 uid: tokens.accessTokenDecoded?.userId,
@@ -648,16 +665,37 @@ export default class Retter {
             await this.storeTokenData(tokenData)
             return tokenData
         } catch (error: any) {
-            const isRioError = error.message.includes("Unexpected error occured in TOKEN")
-            if (isRioError) {
-                await this.signOut(error.message);
-            } else {
+
+            if (this.isNetworkError(error)) {
                 const authEvent = {
                     authStatus: RetterAuthStatus.CONNECTION_FAILED,
-                    message: error.message ?? 'Connection Failed',
+                    message: 'Network error, retrying...',
                 }
                 this.fireAuthStatusChangedEvent(authEvent)
+                throw error
             }
+
+            if (this.isAuthError(error)) {
+                // Auth hatası - logout yap
+                await this.signOut(error.message)
+                throw error
+            }
+
+            if (this.isServerError(error)) {
+                // Server hatası - geçici olabilir, logout yapma
+                const authEvent = {
+                    authStatus: RetterAuthStatus.CONNECTION_FAILED,
+                    message: 'Server error, retrying...',
+                }
+                this.fireAuthStatusChangedEvent(authEvent)
+                throw error
+            }
+
+            const authEvent = {
+                authStatus: RetterAuthStatus.CONNECTION_FAILED,
+                message: error.message ?? 'Connection Failed',
+            }
+            this.fireAuthStatusChangedEvent(authEvent)
             throw error
         }
     }
@@ -684,7 +722,7 @@ export default class Retter {
             await this.clearCloudObjects()
             this.fireAuthStatusChangedEvent({
                 authStatus: RetterAuthStatus.SIGNED_OUT,
-                message: message ?? 'Refresh token failed',
+                message: 'Signed out function called',
             })
         }
     }
@@ -738,7 +776,7 @@ export default class Retter {
             // } else if (isTokenValid(data.accessToken) && isTokenValid(data.refreshToken)) {
             //     data.accessTokenDecoded = jwtDecode(data.accessToken)
             //     data.refreshTokenDecoded = jwtDecode(data.refreshToken)
-    
+
             //     return data
             // } else {
             //     return undefined

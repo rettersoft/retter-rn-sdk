@@ -1,3 +1,7 @@
+# Retter React Native SDK
+
+React Native Client SDK for retter.io backend services.
+
 ## Installation
 
 Using npm:
@@ -12,8 +16,31 @@ Using yarn:
 yarn add @retter/rn-sdk
 ```
 
-> This package uses [@react-native-async-storage/async-storage](https://react-native-async-storage.github.io/async-storage/) as a dependency. If you use bare react native project, head over to installation documents of this package.
+## Peer Dependencies
+
+This package requires the following peer dependencies to be installed in your React Native project:
+
+```bash
+npm install @react-native-async-storage/async-storage
+# or
+yarn add @react-native-async-storage/async-storage
+```
+
+> **Important**: This package uses [@react-native-async-storage/async-storage](https://react-native-async-storage.github.io/async-storage/) as a peer dependency. If you use a bare React Native project, head over to the installation documents of this package.
 > [https://react-native-async-storage.github.io/async-storage/docs/install](https://react-native-async-storage.github.io/async-storage/docs/install)
+
+Additionally, install React Native Firebase packages:
+
+```bash
+npm install @react-native-firebase/app @react-native-firebase/auth @react-native-firebase/firestore
+# or
+yarn add @react-native-firebase/app @react-native-firebase/auth @react-native-firebase/firestore
+```
+
+> **Note**: Follow the official setup guides for React Native Firebase (iOS and Android) after installing the packages.
+> - App: [https://rnfirebase.io/](https://rnfirebase.io/)
+> - Auth: [https://rnfirebase.io/auth/usage](https://rnfirebase.io/auth/usage)
+> - Firestore: [https://rnfirebase.io/firestore/usage](https://rnfirebase.io/firestore/usage)
 
 ## Usage
 
