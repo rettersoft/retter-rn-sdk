@@ -326,21 +326,19 @@ export default class Retter {
     protected async initFirebase(tokenData?: RetterTokenData) {
         try {
             const firebaseConfig = tokenData?.firebase
-            if (!firebaseConfig) return
+            if (!firebaseConfig) {
+                console.log('[RetterSDK] initFirebase: No firebase config provided, skipping Firebase init');
+                return
+            }
 
             // Sign in with custom token using React Native Firebase
             const authInstance = getAuth()
             const firebaseCustomToken = await signInWithCustomToken(authInstance, firebaseConfig.customToken);
             return firebaseCustomToken;
         } catch (err) {
-            console.error('Firebase initialization error', err)
+            console.log('[RetterSDK] initFirebase: Firebase initialization error', err)
             return err;
         }
-    }
-
-    protected clearFirebase() {
-        // React Native Firebase doesn't need explicit cleanup like web SDK
-        // The auth and firestore instances are managed globally
     }
 
     protected getFirebaseListener(
@@ -359,6 +357,8 @@ export default class Retter {
                 if (key.startsWith('__')) delete data[key]
             }
             queue.next(data)
+        }, (error: any) => {
+            console.log('[RetterSDK] getFirebaseListener: Firebase listener error:', error)
         })
     }
 
@@ -368,6 +368,9 @@ export default class Retter {
         const { projectId } = this.clientConfig
 
         const user = await this.getCurrentUser()
+        if (!user) {
+            console.log('[RetterSDK] getFirebaseState: No user currently signed in, cannot create Firebase state')
+        }
 
         const unsubscribers: (() => void)[] = []
 
@@ -384,12 +387,16 @@ export default class Retter {
                 observable: observables.role,
                 subscribe: (callback: (data: any) => void) => {
                     if (!this.listeners[`${listenerPrefix}_role`]) {
-                        const listener = this.getFirebaseListener(
-                            observables.role,
-                            `projects/${projectId}/classes/${config.classId}/instances/${config.instanceId}/roleState`,
-                            user!.identity!
-                        )
-                        this.listeners[`${listenerPrefix}_role`] = listener
+                        try {
+                            const listener = this.getFirebaseListener(
+                                observables.role,
+                                `projects/${projectId}/classes/${config.classId}/instances/${config.instanceId}/roleState`,
+                                user?.identity!
+                            )
+                            this.listeners[`${listenerPrefix}_role`] = listener
+                        } catch (error) {
+                            console.log('[RetterSDK] getFirebaseState: Failed to create role listener:', error)
+                        }
                     }
 
                     return observables.role.subscribe(callback)
@@ -399,12 +406,16 @@ export default class Retter {
                 observable: observables.user,
                 subscribe: (callback: (data: any) => void) => {
                     if (!this.listeners[`${listenerPrefix}_user`]) {
-                        const listener = this.getFirebaseListener(
-                            observables.user,
-                            `projects/${projectId}/classes/${config.classId}/instances/${config.instanceId}/userState`,
-                            user!.userId!
-                        )
-                        this.listeners[`${listenerPrefix}_user`] = listener
+                        try {
+                            const listener = this.getFirebaseListener(
+                                observables.user,
+                                `projects/${projectId}/classes/${config.classId}/instances/${config.instanceId}/userState`,
+                                user?.userId!
+                            )
+                            this.listeners[`${listenerPrefix}_user`] = listener
+                        } catch (error) {
+                            console.log('[RetterSDK] getFirebaseState: Failed to create user listener:', error)
+                        }
                     }
 
                     return observables.user.subscribe(callback)
@@ -414,12 +425,16 @@ export default class Retter {
                 observable: observables.public,
                 subscribe: (callback: (data: any) => void) => {
                     if (!this.listeners[`${listenerPrefix}_public`]) {
-                        const listener = this.getFirebaseListener(
-                            observables.public,
-                            `projects/${projectId}/classes/${config.classId}/instances`,
-                            config.instanceId!
-                        )
-                        this.listeners[`${listenerPrefix}_public`] = listener
+                        try {
+                            const listener = this.getFirebaseListener(
+                                observables.public,
+                                `projects/${projectId}/classes/${config.classId}/instances`,
+                                config.instanceId!
+                            )
+                            this.listeners[`${listenerPrefix}_public`] = listener
+                        } catch (error) {
+                            console.log('[RetterSDK] getFirebaseState: Failed to create public listener:', error)
+                        }
                     }
 
                     return observables.public.subscribe(callback)
@@ -456,7 +471,24 @@ export default class Retter {
             return seekedObject
         }
 
-        const { state } = await this.getFirebaseState(config)
+        let state;
+        try {
+            // Sadece user varsa Firebase state oluştur
+            const user = await this.getCurrentUser()
+            if (user) {
+                const firebaseState = await this.getFirebaseState(config)
+                state = firebaseState.state
+            } else {
+                // User yoksa boş state oluştur
+                state = {
+                    role: { observable: new Observable<any>(() => { }), subscribe: () => ({ unsubscribe: () => { } }) },
+                    user: { observable: new Observable<any>(() => { }), subscribe: () => ({ unsubscribe: () => { } }) },
+                    public: { observable: new Observable<any>(() => { }), subscribe: () => ({ unsubscribe: () => { } }) }
+                }
+            }
+        } catch (error) {
+            console.log('[RetterSDK] getCloudObject: Failed to get Firebase state:', error);
+        }
 
         const call = async <T>(
             params: RetterCloudObjectCall
@@ -528,28 +560,35 @@ export default class Retter {
         return retVal
     }
 
-    protected async clearCloudObjects() {
-        // clear listeners
-        const listeners = Object.values(this.listeners)
-        if (listeners.length > 0) {
-            listeners.map((i) => i())
+    protected async clearCloudObjects(shouldSignOut: boolean = true) {
+        try {
+            // Clear listeners
+            const listeners = Object.values(this.listeners)
+            if (listeners.length > 0) {
+                listeners.map((i) => i())
 
-            this.cloudObjects.map((i) => {
-                i.state?.role.queue?.complete()
-                i.state?.user.queue?.complete()
-                i.state?.public.queue?.complete()
-            })
+                this.cloudObjects.map((i) => {
+                    i.state?.role.queue?.complete()
+                    i.state?.user.queue?.complete()
+                    i.state?.public.queue?.complete()
+                })
+            }
+            this.listeners = {}
+
+            this.cloudObjects.map((i) => i.unsubscribers.map((u) => u()))
+            this.cloudObjects = []
+
+            if (shouldSignOut) {
+                const authInstance = getAuth()
+                const currentUser = authInstance.currentUser
+                if (currentUser) {
+                    await signOut(authInstance)
+                }
+            }
+        } catch (error) {
+            console.log('[RetterSDK] clearCloudObjects: Error clearing cloud objects:', error)
         }
-        this.listeners = {}
-
-        this.cloudObjects.map((i) => i.unsubscribers.map((u) => u()))
-        this.cloudObjects = []
-
-        const authInstance = getAuth()
-        await signOut(authInstance)
-        this.clearFirebase()
     }
-
     // #endregion
 
 
@@ -581,9 +620,6 @@ export default class Retter {
             (error.response && error.response.status === 502)    // Bad gateway
     }
 
-
-
-
     // #region Static Call
     public async makeStaticCall<T>(
         params: RetterCloudObjectStaticCall
@@ -595,20 +631,33 @@ export default class Retter {
             classId: params.classId,
         })
     }
-
     // #endregion
 
     // #region Auth
     protected async initAuth() {
         const tokens = await this.getCurrentTokenData()
         if (tokens) {
-            await this.initFirebase(tokens)
+            try {
+                const firebaseResult = await this.initFirebase(tokens)
 
-            this.fireAuthStatusChangedEvent({
-                authStatus: RetterAuthStatus.SIGNED_IN,
-                uid: tokens.accessTokenDecoded?.userId,
-                identity: tokens.accessTokenDecoded?.identity,
-            })
+                // Firebase init başarısızsa (hata döndürürse) signed out olarak işaretle
+                if (firebaseResult instanceof Error) {
+                    console.warn('[RetterSDK] initAuth: Firebase initialization failed, signing out user')
+                    // this.fireAuthStatusChangedEvent({
+                    //     authStatus: RetterAuthStatus.SIGNED_OUT,
+                    //     message: 'Firebase initialization failed',
+                    // })
+                    return
+                }
+
+                this.fireAuthStatusChangedEvent({
+                    authStatus: RetterAuthStatus.SIGNED_IN,
+                    uid: tokens.accessTokenDecoded?.userId,
+                    identity: tokens.accessTokenDecoded?.identity,
+                })
+            } catch (error) {
+                console.error('[RetterSDK] initAuth: Auth initialization error:', error)
+            }
         } else {
             this.fireAuthStatusChangedEvent({
                 authStatus: RetterAuthStatus.SIGNED_OUT,
@@ -632,8 +681,7 @@ export default class Retter {
         const tokenData = this.formatTokenData(response.data)
         await this.storeTokenData(tokenData)
 
-        this.clearFirebase()
-        this.clearCloudObjects()
+        this.clearCloudObjects(false) // Don't sign out during login process
         await this.initFirebase(tokenData)
 
         const authEvent = {
@@ -717,7 +765,6 @@ export default class Retter {
             }
         } catch (error) {
         } finally {
-            this.clearFirebase()
             await this.clearTokenData()
             await this.clearCloudObjects()
             this.fireAuthStatusChangedEvent({
