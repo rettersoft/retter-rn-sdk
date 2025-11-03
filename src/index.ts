@@ -319,7 +319,6 @@ export default class Retter {
 
         return `https://${prefix}/${this.clientConfig?.projectId}${path}`
     }
-
     // #endregion
 
     // #region Firebase
@@ -333,9 +332,22 @@ export default class Retter {
 
             // Sign in with custom token using React Native Firebase
             const authInstance = getAuth()
+            // If a user is already signed in, do NOT call signInWithCustomToken again
+            if (authInstance.currentUser) {
+                return authInstance.currentUser
+            }
+
             const firebaseCustomToken = await signInWithCustomToken(authInstance, firebaseConfig.customToken);
             return firebaseCustomToken;
-        } catch (err) {
+        } catch (err: any) {
+            // If token is invalid/expired but we already have a session, ignore
+            if (err?.code === 'auth/invalid-custom-token') {
+                const authInstance = getAuth()
+                if (authInstance.currentUser) {
+                    console.log('[RetterSDK] initFirebase: Invalid custom token but user already signed in, ignoring')
+                    return authInstance.currentUser
+                }
+            }
             console.log('[RetterSDK] initFirebase: Firebase initialization error', err)
             return err;
         }
@@ -643,11 +655,6 @@ export default class Retter {
                 // Firebase init başarısızsa (hata döndürürse) signed out olarak işaretle
                 if (firebaseResult instanceof Error) {
                     console.warn('[RetterSDK] initAuth: Firebase initialization failed, signing out user')
-                    // this.fireAuthStatusChangedEvent({
-                    //     authStatus: RetterAuthStatus.SIGNED_OUT,
-                    //     message: 'Firebase initialization failed',
-                    // })
-                    return
                 }
 
                 this.fireAuthStatusChangedEvent({
