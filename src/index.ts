@@ -651,10 +651,8 @@ export default class Retter {
         if (tokens) {
             try {
                 const firebaseResult = await this.initFirebase(tokens)
-
-                // Firebase init başarısızsa (hata döndürürse) signed out olarak işaretle
                 if (firebaseResult instanceof Error) {
-                    console.warn('[RetterSDK] initAuth: Firebase initialization failed, signing out user')
+                    // console.warn('[RetterSDK] initAuth: Firebase initialization failed, signing out user')
                 }
 
                 this.fireAuthStatusChangedEvent({
