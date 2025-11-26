@@ -23,7 +23,7 @@ import firestore, { getFirestore, collection, doc, onSnapshot } from '@react-nat
 import auth, { getAuth, signInWithCustomToken, signOut } from '@react-native-firebase/auth'
 import axios, { AxiosInstance, AxiosRequestConfig } from 'axios'
 // import { Agent } from 'https'
-import { base64Encode, getInstallationId, isTokenValid, sort } from './helpers'
+import { base64Encode, getInstallationId, isTokenValid, logEvent, sort } from './helpers'
 
 export * from './types'
 
@@ -128,24 +128,26 @@ export default class Retter {
             const tokens = await this.getCurrentTokenData()
 
             const now = Math.floor(Date.now() / 1000)
-            const safeNow = now + 30 + (tokens?.diff ?? 0) // add server time diff
+            const safeNow = now + 60 // 60 saniye buffer
             const accessTokenDecoded = tokens?.accessTokenDecoded
 
-            if (accessTokenDecoded && accessTokenDecoded.exp < safeNow) {
+            if (!accessTokenDecoded || !accessTokenDecoded.exp || accessTokenDecoded.exp < safeNow) {
                 if (this.refreshTokenPromise) {
                     try {
-                        const newTokenData = await this.refreshTokenPromise
-                        if (!newTokenData) {
-                            this.fireAuthStatusChangedEvent({
-                                authStatus: RetterAuthStatus.SIGNED_OUT,
-                                message: 'Already have refreshTokenPromise => tokenData is undefined',
-                            })
-                            throw new Error('Access token is undefined.')
+                        const newToken = await this.refreshTokenPromise
+                        if (!newToken) {
+                            await logEvent('token refresh invalid-1', {
+                                projectId: this.clientConfig?.projectId,
+                                userId: tokens?.accessTokenDecoded?.userId,
+                                reason: 'Refresh token promise returned invalid token',
+                            }, 'error')
+                            await this.signOut('Refresh token returned invalid token')
+                            throw new Error('Access token is invalid after refresh.')
                         }
                         const newData = { ...data }
                         newData.headers = {
                             ...newData.headers,
-                            Authorization: `Bearer ${newTokenData}`,
+                            Authorization: `Bearer ${newToken}`,
                         }
 
                         return await this.executeRequest(endpoint, newData)
@@ -167,11 +169,13 @@ export default class Retter {
                 try {
                     const newToken = await this.refreshTokenPromise
                     if (!newToken) {
-                        this.fireAuthStatusChangedEvent({
-                            authStatus: RetterAuthStatus.SIGNED_OUT,
-                            message: 'First time refreshTokenPromise => tokenData is undefined',
-                        })
-                        throw new Error('Access token is undefined.')
+                        await logEvent('token refresh invalid-2', {
+                            projectId: this.clientConfig?.projectId,
+                            userId: tokens?.accessTokenDecoded?.userId,
+                            reason: 'Refresh token promise returned invalid token',
+                        }, 'error')
+                        await this.signOut('Refresh token returned invalid token')
+                        throw new Error('Access token is invalid after refresh.')
                     }
                     const newData = { ...data }
                     newData.headers = {
@@ -197,20 +201,62 @@ export default class Retter {
                 // }
             } else {
                 const newData = { ...data }
-                if (tokens?.accessToken !== 'undefined' && tokens?.accessToken !== 'null' && tokens?.accessToken) {
+                if (tokens?.accessToken &&
+                    tokens.accessToken !== 'undefined' &&
+                    tokens.accessToken !== 'null' &&
+                    tokens.accessToken.trim() !== '') {
                     newData.headers = {
                         ...newData.headers,
                         Authorization: `Bearer ${tokens.accessToken}`,
                     }
                 } else {
-                    this.fireAuthStatusChangedEvent({
-                        authStatus: RetterAuthStatus.SIGNED_OUT,
-                        message: 'Access token is undefined',
-                    })
+                    await logEvent('token invalid', {
+                        projectId: this.clientConfig?.projectId,
+                        userId: tokens?.accessTokenDecoded?.userId,
+                        reason: 'Access token is invalid or empty',
+                        hasTokens: !!tokens,
+                        hasAccessToken: !!tokens?.accessToken,
+                    }, 'error')
+                    await this.signOut('Access token is invalid')
+                    throw new Error('Access token is invalid')
                 }
                 return await this.executeRequest(endpoint, newData)
             }
-        } catch (error) {
+        } catch (error: any) {
+            // Backend'den 401 geldiğinde token expire olmuş olabilir
+            // Refresh token çağır ve request'i tekrar dene (sadece bir kez)
+            if (error.response && error.response.status === 401 && retryCount === 0) {
+                try {
+                    await logEvent('backend 401 refresh', {
+                        projectId: this.clientConfig?.projectId,
+                        endpoint: error.config?.url,
+                        action: action,
+                        reason: 'Backend returned 401, attempting token refresh',
+                    }, 'warn')
+                    // Token refresh yap
+                    const refreshedTokenData = await this.refreshToken()
+                    if (refreshedTokenData && refreshedTokenData.accessToken) {
+                        // Yeni token ile request'i tekrar gönder
+                        const newData = { ...data }
+                        newData.headers = {
+                            ...newData.headers,
+                            Authorization: `Bearer ${refreshedTokenData.accessToken}`,
+                        }
+                        return await this.makeAPIRequest(action, newData, retryCount + 1)
+                    }
+                } catch (refreshError: any) {
+                    await logEvent('backend 401 refresh failed', {
+                        projectId: this.clientConfig?.projectId,
+                        endpoint: error.config?.url,
+                        action: action,
+                        reason: refreshError?.message || 'Token refresh failed after 401',
+                        errorCode: refreshError?.response?.status,
+                    }, 'error')
+                    // Refresh başarısız oldu, orijinal hatayı fırlat
+                    throw error
+                }
+            }
+
             if (this.isRetryableError(error) && retryCount < 3) {
                 const delay = Math.min(1000 * Math.pow(2, retryCount), 5000) // Exponential backoff, max 5s
                 await new Promise(resolve => setTimeout(resolve, delay))
@@ -358,12 +404,22 @@ export default class Retter {
         collectionPath: string,
         documentId: string
     ): () => void {
-        // Remove leading slash from collection path if present
         const cleanCollection = collectionPath.startsWith('/') ? collectionPath.slice(1) : collectionPath
+
+        if (!documentId || documentId.trim() === '') {
+            console.log('[RetterSDK] getFirebaseListener: documentId is empty, cannot create listener')
+            queue.next({})
+            return () => { }
+        }
+
         const db = getFirestore()
         const documentRef = doc(db, cleanCollection, documentId)
 
         return onSnapshot(documentRef, (doc: any) => {
+            if (!doc || !doc.exists()) {
+                queue.next({})
+                return
+            }
             const data = Object.assign({}, doc.data())
             for (const key of Object.keys(data)) {
                 if (key.startsWith('__')) delete data[key]
@@ -626,8 +682,6 @@ export default class Retter {
 
     private isRetryableError(error: any): boolean {
         return this.isNetworkError(error) ||
-            this.isServerError(error) ||
-            (error.response && error.response.status === 429) || // Rate limit
             (error.response && error.response.status === 503) || // Service unavailable
             (error.response && error.response.status === 502)    // Bad gateway
     }
@@ -705,8 +759,22 @@ export default class Retter {
 
         try {
             const tokens = await this.getCurrentTokenData()
-            const refreshToken = tokens?.refreshToken
-            const accessToken = tokens?.accessToken
+
+            // Token yoksa veya refresh token yoksa logout yap
+            if (!tokens || !tokens.refreshToken || !tokens.accessToken) {
+                await logEvent('refresh token no tokens', {
+                    projectId: this.clientConfig?.projectId,
+                    hasTokens: !!tokens,
+                    hasRefreshToken: !!tokens?.refreshToken,
+                    hasAccessToken: !!tokens?.accessToken,
+                    reason: 'No tokens available for refresh',
+                }, 'error')
+                await this.signOut('No tokens available for refresh')
+                throw new Error('No tokens available for refresh')
+            }
+
+            const refreshToken = tokens.refreshToken
+            const accessToken = tokens.accessToken
 
             const response = await this.axiosInstance!({
                 url: this.buildUrl(projectId, '/TOKEN/refresh'),
@@ -718,7 +786,6 @@ export default class Retter {
             await this.storeTokenData(tokenData)
             return tokenData
         } catch (error: any) {
-
             if (this.isNetworkError(error)) {
                 const authEvent = {
                     authStatus: RetterAuthStatus.CONNECTION_FAILED,
@@ -729,13 +796,18 @@ export default class Retter {
             }
 
             if (this.isAuthError(error)) {
-                // Auth hatası - logout yap
-                await this.signOut(error.message)
+                await logEvent('refresh token auth error', {
+                    projectId: this.clientConfig?.projectId,
+                    errorStatus: error.response?.status,
+                    errorCode: error.response?.data?.code,
+                    errorMessage: error.message || 'Refresh token failed',
+                    reason: 'Auth error during token refresh',
+                }, 'error')
+                await this.signOut(error.message || 'Refresh token failed')
                 throw error
             }
 
             if (this.isServerError(error)) {
-                // Server hatası - geçici olabilir, logout yapma
                 const authEvent = {
                     authStatus: RetterAuthStatus.CONNECTION_FAILED,
                     message: 'Server error, retrying...',
@@ -768,7 +840,11 @@ export default class Retter {
                     },
                 })
             }
-        } catch (error) {
+        } catch (error: any) {
+            await logEvent('sign out catch', {
+                projectId: this.clientConfig?.projectId,
+                reason: error.message || 'Sign out catch',
+            }, 'error')
         } finally {
             await this.clearTokenData()
             await this.clearCloudObjects()
@@ -797,12 +873,6 @@ export default class Retter {
     protected formatTokenData(tokenData: RetterTokenData): RetterTokenData {
         tokenData.accessTokenDecoded = jwtDecode(tokenData.accessToken)
         tokenData.refreshTokenDecoded = jwtDecode(tokenData.refreshToken)
-
-        if (tokenData.accessTokenDecoded?.iat) {
-            tokenData.diff =
-                tokenData.accessTokenDecoded.iat - Math.floor(Date.now() / 1000)
-        }
-
         return tokenData
     }
 
@@ -816,23 +886,13 @@ export default class Retter {
 
         try {
             const data = JSON.parse(item)
-
-            if (data.accessTokenDecoded && data.refreshTokenDecoded) return data;
+            if (data.accessTokenDecoded && data.refreshTokenDecoded) {
+                return data
+            }
 
             data.accessTokenDecoded = jwtDecode(data.accessToken)
             data.refreshTokenDecoded = jwtDecode(data.refreshToken)
             return data
-
-            // if (data.accessTokenDecoded && data.refreshTokenDecoded) {
-            //     return data
-            // } else if (isTokenValid(data.accessToken) && isTokenValid(data.refreshToken)) {
-            //     data.accessTokenDecoded = jwtDecode(data.accessToken)
-            //     data.refreshTokenDecoded = jwtDecode(data.refreshToken)
-
-            //     return data
-            // } else {
-            //     return undefined
-            // }
         } catch (e) {
             return undefined
         }
