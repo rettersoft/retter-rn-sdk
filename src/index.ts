@@ -825,19 +825,25 @@ export default class Retter {
         try {
             const data = JSON.parse(item)
 
-            if (!data.accessTokenDecoded && data.accessToken) {
-                data.accessTokenDecoded = jwtDecode(data.accessToken)
-            }
-            if (!data.refreshTokenDecoded && data.refreshToken) {
-                data.refreshTokenDecoded = jwtDecode(data.refreshToken)
-            }
+            if (data.accessTokenDecoded && data.refreshTokenDecoded) return data;
 
-            if (data.accessTokenDecoded?.iat) {
-                const currentTime = Math.floor(Date.now() / 1000)
-                data.diff = data.accessTokenDecoded.iat - currentTime
-            }
-
+            data.accessTokenDecoded = jwtDecode(data.accessToken)
+            data.refreshTokenDecoded = jwtDecode(data.refreshToken)
             return data
+
+            // if (!data.accessTokenDecoded && data.accessToken) {
+            //     data.accessTokenDecoded = jwtDecode(data.accessToken)
+            // }
+            // if (!data.refreshTokenDecoded && data.refreshToken) {
+            //     data.refreshTokenDecoded = jwtDecode(data.refreshToken)
+            // }
+
+            // if (data.accessTokenDecoded?.iat) {
+            //     const currentTime = Math.floor(Date.now() / 1000)
+            //     data.diff = data.accessTokenDecoded.iat - currentTime
+            // }
+
+            // return data
         } catch (e) {
             return undefined
         }
