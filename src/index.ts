@@ -19,8 +19,8 @@ import {
     RetterTokenPayload,
 } from './types'
 import jwtDecode from 'jwt-decode'
-import firestore, { getFirestore, collection, doc, onSnapshot } from '@react-native-firebase/firestore'
-import auth, { getAuth, signInWithCustomToken, signOut } from '@react-native-firebase/auth'
+import { getFirestore, doc, onSnapshot } from '@react-native-firebase/firestore'
+import { getAuth, signInWithCustomToken, signOut } from '@react-native-firebase/auth'
 import axios, { AxiosInstance, AxiosRequestConfig } from 'axios'
 // import { Agent } from 'https'
 import { base64Encode, getInstallationId, isTokenValid, sort } from './helpers'
@@ -360,10 +360,22 @@ export default class Retter {
     ): () => void {
         // Remove leading slash from collection path if present
         const cleanCollection = collectionPath.startsWith('/') ? collectionPath.slice(1) : collectionPath
+
+        if (!documentId || documentId.trim() === '') {
+            console.log('[RetterSDK] getFirebaseListener: documentId is empty, cannot create listener')
+            queue.next({})
+            return () => { }
+        }
+
         const db = getFirestore()
         const documentRef = doc(db, cleanCollection, documentId)
 
         return onSnapshot(documentRef, (doc: any) => {
+            if (!doc || !doc.exists()) {
+                queue.next({})
+                return
+            }
+
             const data = Object.assign({}, doc.data())
             for (const key of Object.keys(data)) {
                 if (key.startsWith('__')) delete data[key]
@@ -626,8 +638,6 @@ export default class Retter {
 
     private isRetryableError(error: any): boolean {
         return this.isNetworkError(error) ||
-            this.isServerError(error) ||
-            (error.response && error.response.status === 429) || // Rate limit
             (error.response && error.response.status === 503) || // Service unavailable
             (error.response && error.response.status === 502)    // Bad gateway
     }
@@ -729,13 +739,11 @@ export default class Retter {
             }
 
             if (this.isAuthError(error)) {
-                // Auth hatası - logout yap
                 await this.signOut(error.message)
                 throw error
             }
 
             if (this.isServerError(error)) {
-                // Server hatası - geçici olabilir, logout yapma
                 const authEvent = {
                     authStatus: RetterAuthStatus.CONNECTION_FAILED,
                     message: 'Server error, retrying...',
@@ -817,22 +825,19 @@ export default class Retter {
         try {
             const data = JSON.parse(item)
 
-            if (data.accessTokenDecoded && data.refreshTokenDecoded) return data;
+            if (!data.accessTokenDecoded && data.accessToken) {
+                data.accessTokenDecoded = jwtDecode(data.accessToken)
+            }
+            if (!data.refreshTokenDecoded && data.refreshToken) {
+                data.refreshTokenDecoded = jwtDecode(data.refreshToken)
+            }
 
-            data.accessTokenDecoded = jwtDecode(data.accessToken)
-            data.refreshTokenDecoded = jwtDecode(data.refreshToken)
+            if (data.accessTokenDecoded?.iat) {
+                const currentTime = Math.floor(Date.now() / 1000)
+                data.diff = data.accessTokenDecoded.iat - currentTime
+            }
+
             return data
-
-            // if (data.accessTokenDecoded && data.refreshTokenDecoded) {
-            //     return data
-            // } else if (isTokenValid(data.accessToken) && isTokenValid(data.refreshToken)) {
-            //     data.accessTokenDecoded = jwtDecode(data.accessToken)
-            //     data.refreshTokenDecoded = jwtDecode(data.refreshToken)
-
-            //     return data
-            // } else {
-            //     return undefined
-            // }
         } catch (e) {
             return undefined
         }
