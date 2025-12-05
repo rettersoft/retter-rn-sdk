@@ -23,7 +23,7 @@ import { getFirestore, doc, onSnapshot } from '@react-native-firebase/firestore'
 import { getAuth, signInWithCustomToken, signOut } from '@react-native-firebase/auth'
 import axios, { AxiosInstance, AxiosRequestConfig } from 'axios'
 // import { Agent } from 'https'
-import { base64Encode, getInstallationId, isTokenValid, sort } from './helpers'
+import { base64Encode, getInstallationId, sort } from './helpers'
 
 export * from './types'
 
@@ -396,6 +396,10 @@ export default class Retter {
             console.log('[RetterSDK] getFirebaseState: No user currently signed in, cannot create Firebase state')
         }
 
+        // Get Firebase auth UID for Firestore rules compatibility
+        const authInstance = getAuth()
+        const firebaseUid = authInstance.currentUser?.uid
+
         const unsubscribers: (() => void)[] = []
 
         const observables = {
@@ -431,10 +435,16 @@ export default class Retter {
                 subscribe: (callback: (data: any) => void) => {
                     if (!this.listeners[`${listenerPrefix}_user`]) {
                         try {
+                            // Use Firebase auth.uid instead of user.userId for Firestore rules compatibility
+                            const documentId = firebaseUid || user?.userId
+                            if (!documentId) {
+                                console.log('[RetterSDK] getFirebaseState: No Firebase UID or userId available, cannot create user listener')
+                                return observables.user.subscribe(callback)
+                            }
                             const listener = this.getFirebaseListener(
                                 observables.user,
                                 `projects/${projectId}/classes/${config.classId}/instances/${config.instanceId}/userState`,
-                                user?.userId!
+                                documentId
                             )
                             this.listeners[`${listenerPrefix}_user`] = listener
                         } catch (error) {
