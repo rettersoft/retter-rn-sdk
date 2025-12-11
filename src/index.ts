@@ -23,7 +23,7 @@ import { getFirestore, doc, onSnapshot } from '@react-native-firebase/firestore'
 import { getAuth, signInWithCustomToken, signOut } from '@react-native-firebase/auth'
 import axios, { AxiosInstance, AxiosRequestConfig } from 'axios'
 // import { Agent } from 'https'
-import { base64Encode, getInstallationId, isTokenValid, sort } from './helpers'
+import { base64Encode, getInstallationId, sort } from './helpers'
 
 export * from './types'
 
@@ -332,22 +332,41 @@ export default class Retter {
 
             // Sign in with custom token using React Native Firebase
             const authInstance = getAuth()
-            // If a user is already signed in, do NOT call signInWithCustomToken again
-            if (authInstance.currentUser) {
-                return authInstance.currentUser
-            }
 
-            const firebaseCustomToken = await signInWithCustomToken(authInstance, firebaseConfig.customToken);
-            return firebaseCustomToken;
-        } catch (err: any) {
-            // If token is invalid/expired but we already have a session, ignore
-            if (err?.code === 'auth/invalid-custom-token') {
-                const authInstance = getAuth()
-                if (authInstance.currentUser) {
-                    console.log('[RetterSDK] initFirebase: Invalid custom token but user already signed in, ignoring')
-                    return authInstance.currentUser
+            // Even if user exists, try to sign in with new token to refresh expired tokens
+            // Firebase will handle if token is same or if it needs to be refreshed
+            try {
+                const firebaseCustomToken = await signInWithCustomToken(authInstance, firebaseConfig.customToken);
+                return firebaseCustomToken;
+            } catch (err: any) {
+                // If token is invalid/expired but we already have a session, try to refresh token
+                if (err?.code === 'auth/invalid-custom-token') {
+                    const authInstance = getAuth()
+                    if (authInstance.currentUser) {
+                        console.log('[RetterSDK] initFirebase: Invalid custom token but user already signed in, attempting to refresh token')
+
+                        // Try to refresh token (this will also reinitialize Firebase with new token)
+                        try {
+                            await this.refreshToken()
+                            // refreshToken already calls initFirebase with new token, so check if it worked
+                            const newAuthInstance = getAuth()
+                            if (newAuthInstance.currentUser) {
+                                console.log('[RetterSDK] initFirebase: Successfully refreshed and reinitialized Firebase')
+                                return newAuthInstance.currentUser
+                            }
+                        } catch (refreshError) {
+                            console.log('[RetterSDK] initFirebase: Failed to refresh token, using existing session:', refreshError)
+                            // If refresh fails, return current user as fallback
+                            return authInstance.currentUser
+                        }
+
+                        // Fallback: return current user if refresh didn't work
+                        return authInstance.currentUser
+                    }
                 }
+                throw err;
             }
+        } catch (err: any) {
             console.log('[RetterSDK] initFirebase: Firebase initialization error', err)
             return err;
         }
@@ -356,7 +375,8 @@ export default class Retter {
     protected getFirebaseListener(
         queue: any,
         collectionPath: string,
-        documentId: string
+        documentId: string,
+        listenerKey?: string
     ): () => void {
         // Remove leading slash from collection path if present
         const cleanCollection = collectionPath.startsWith('/') ? collectionPath.slice(1) : collectionPath
@@ -367,10 +387,24 @@ export default class Retter {
             return () => { }
         }
 
+        // Check if Firebase auth is initialized before creating listener
+        const authInstance = getAuth()
+        if (!authInstance.currentUser) {
+            console.log('[RetterSDK] getFirebaseListener: Firebase user not authenticated, cannot create listener')
+            queue.next({})
+            return () => { }
+        }
+
         const db = getFirestore()
         const documentRef = doc(db, cleanCollection, documentId)
 
-        return onSnapshot(documentRef, (doc: any) => {
+        let hasError = false
+        let retryAttempted = false
+
+        const unsubscribe = onSnapshot(documentRef, (doc: any) => {
+            // Reset error flag on successful read
+            hasError = false
+
             if (!doc || !doc.exists()) {
                 queue.next({})
                 return
@@ -378,12 +412,69 @@ export default class Retter {
 
             const data = Object.assign({}, doc.data())
             for (const key of Object.keys(data)) {
-                if (key.startsWith('__')) delete data[key]
+                if (key.startsWith('__')) {
+                    delete data[key]
+                }
             }
             queue.next(data)
-        }, (error: any) => {
+        }, async (error: any) => {
             console.log('[RetterSDK] getFirebaseListener: Firebase listener error:', error)
+
+            // Clean up listener if permission denied
+            if (error?.code === 'permission-denied' || error?.code === 'firestore/permission-denied') {
+                hasError = true
+
+                // Try to refresh token and recreate listener once
+                if (!retryAttempted) {
+                    retryAttempted = true
+                    console.log('[RetterSDK] getFirebaseListener: Permission denied, attempting to refresh Firebase auth')
+
+                    try {
+                        // Refresh token (this will also reinitialize Firebase with new custom token)
+                        await this.refreshToken()
+
+                        // Wait a bit for Firebase to reinitialize
+                        await new Promise(resolve => setTimeout(resolve, 500))
+
+                        // Check if auth is now valid
+                        const newAuthInstance = getAuth()
+                        if (newAuthInstance.currentUser && listenerKey) {
+                            // Unsubscribe old listener
+                            unsubscribe()
+                            if (this.listeners[listenerKey]) {
+                                delete this.listeners[listenerKey]
+                            }
+
+                            // Recreate listener with refreshed auth
+                            // Firebase will automatically send the current document snapshot when listener is created
+                            console.log('[RetterSDK] getFirebaseListener: Recreating listener, will receive current document state')
+                            const newListener = this.getFirebaseListener(
+                                queue,
+                                collectionPath,
+                                documentId,
+                                listenerKey
+                            )
+                            this.listeners[listenerKey] = newListener
+                            return
+                        }
+                    } catch (refreshError) {
+                        console.log('[RetterSDK] getFirebaseListener: Failed to refresh Firebase auth:', refreshError)
+                    }
+                }
+
+                // If refresh failed or already attempted, clean up listener
+                console.log('[RetterSDK] getFirebaseListener: Permission denied, cleaning up listener')
+                if (listenerKey && this.listeners[listenerKey]) {
+                    delete this.listeners[listenerKey]
+                }
+                // Send empty data to queue to indicate error state
+                queue.next({})
+            } else {
+                hasError = true
+            }
         })
+
+        return unsubscribe
     }
 
     protected async getFirebaseState(config: RetterCloudObjectConfig) {
@@ -395,6 +486,10 @@ export default class Retter {
         if (!user) {
             console.log('[RetterSDK] getFirebaseState: No user currently signed in, cannot create Firebase state')
         }
+
+        // Get Firebase auth UID for Firestore rules compatibility
+        const authInstance = getAuth()
+        const firebaseUid = authInstance.currentUser?.uid
 
         const unsubscribers: (() => void)[] = []
 
@@ -410,14 +505,16 @@ export default class Retter {
             role: {
                 observable: observables.role,
                 subscribe: (callback: (data: any) => void) => {
-                    if (!this.listeners[`${listenerPrefix}_role`]) {
+                    const listenerKey = `${listenerPrefix}_role`
+                    if (!this.listeners[listenerKey]) {
                         try {
                             const listener = this.getFirebaseListener(
                                 observables.role,
                                 `projects/${projectId}/classes/${config.classId}/instances/${config.instanceId}/roleState`,
-                                user?.identity!
+                                user?.identity!,
+                                listenerKey
                             )
-                            this.listeners[`${listenerPrefix}_role`] = listener
+                            this.listeners[listenerKey] = listener
                         } catch (error) {
                             console.log('[RetterSDK] getFirebaseState: Failed to create role listener:', error)
                         }
@@ -429,14 +526,22 @@ export default class Retter {
             user: {
                 observable: observables.user,
                 subscribe: (callback: (data: any) => void) => {
-                    if (!this.listeners[`${listenerPrefix}_user`]) {
+                    const listenerKey = `${listenerPrefix}_user`
+                    if (!this.listeners[listenerKey]) {
                         try {
+                            // Use Firebase auth.uid instead of user.userId for Firestore rules compatibility
+                            const documentId = firebaseUid || user?.userId
+                            if (!documentId) {
+                                console.log('[RetterSDK] getFirebaseState: No Firebase UID or userId available, cannot create user listener')
+                                return observables.user.subscribe(callback)
+                            }
                             const listener = this.getFirebaseListener(
                                 observables.user,
                                 `projects/${projectId}/classes/${config.classId}/instances/${config.instanceId}/userState`,
-                                user?.userId!
+                                documentId,
+                                listenerKey
                             )
-                            this.listeners[`${listenerPrefix}_user`] = listener
+                            this.listeners[listenerKey] = listener
                         } catch (error) {
                             console.log('[RetterSDK] getFirebaseState: Failed to create user listener:', error)
                         }
@@ -448,14 +553,16 @@ export default class Retter {
             public: {
                 observable: observables.public,
                 subscribe: (callback: (data: any) => void) => {
-                    if (!this.listeners[`${listenerPrefix}_public`]) {
+                    const listenerKey = `${listenerPrefix}_public`
+                    if (!this.listeners[listenerKey]) {
                         try {
                             const listener = this.getFirebaseListener(
                                 observables.public,
                                 `projects/${projectId}/classes/${config.classId}/instances`,
-                                config.instanceId!
+                                config.instanceId!,
+                                listenerKey
                             )
-                            this.listeners[`${listenerPrefix}_public`] = listener
+                            this.listeners[listenerKey] = listener
                         } catch (error) {
                             console.log('[RetterSDK] getFirebaseState: Failed to create public listener:', error)
                         }
@@ -726,6 +833,17 @@ export default class Retter {
 
             const tokenData = this.formatTokenData(response.data)
             await this.storeTokenData(tokenData)
+
+            // Firebase custom token'ı da yenile (token refresh edildiğinde yeni custom token gelir)
+            if (tokenData.firebase?.customToken) {
+                try {
+                    await this.initFirebase(tokenData)
+                } catch (firebaseError) {
+                    console.log('[RetterSDK] refreshToken: Failed to reinitialize Firebase after token refresh:', firebaseError)
+                    // Firebase init hatası token refresh'i başarısız yapmamalı
+                }
+            }
+
             return tokenData
         } catch (error: any) {
 
