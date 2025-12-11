@@ -59,6 +59,8 @@ export default class Retter {
 
     private refreshTokenPromise: Promise<any> | null = null
 
+    private firebaseSignInFailed = false;
+
     private sslPinningEnabled: boolean = true
 
     protected axiosInstance?: AxiosInstance
@@ -330,43 +332,18 @@ export default class Retter {
                 return
             }
 
-            // Sign in with custom token using React Native Firebase
             const authInstance = getAuth()
 
-            // Even if user exists, try to sign in with new token to refresh expired tokens
-            // Firebase will handle if token is same or if it needs to be refreshed
             try {
                 const firebaseCustomToken = await signInWithCustomToken(authInstance, firebaseConfig.customToken);
+                this.firebaseSignInFailed = false;
                 return firebaseCustomToken;
             } catch (err: any) {
-                // If token is invalid/expired but we already have a session, try to refresh token
-                if (err?.code === 'auth/invalid-custom-token') {
-                    const authInstance = getAuth()
-                    if (authInstance.currentUser) {
-                        console.log('[RetterSDK] initFirebase: Invalid custom token but user already signed in, attempting to refresh token')
-
-                        // Try to refresh token (this will also reinitialize Firebase with new token)
-                        try {
-                            await this.refreshToken()
-                            // refreshToken already calls initFirebase with new token, so check if it worked
-                            const newAuthInstance = getAuth()
-                            if (newAuthInstance.currentUser) {
-                                console.log('[RetterSDK] initFirebase: Successfully refreshed and reinitialized Firebase')
-                                return newAuthInstance.currentUser
-                            }
-                        } catch (refreshError) {
-                            console.log('[RetterSDK] initFirebase: Failed to refresh token, using existing session:', refreshError)
-                            // If refresh fails, return current user as fallback
-                            return authInstance.currentUser
-                        }
-
-                        // Fallback: return current user if refresh didn't work
-                        return authInstance.currentUser
-                    }
-                }
-                throw err;
+                this.firebaseSignInFailed = true;
+                return err;
             }
         } catch (err: any) {
+
             console.log('[RetterSDK] initFirebase: Firebase initialization error', err)
             return err;
         }
@@ -430,7 +407,7 @@ export default class Retter {
                     console.log('[RetterSDK] getFirebaseListener: Permission denied, attempting to refresh Firebase auth')
 
                     try {
-                        // Refresh token (this will also reinitialize Firebase with new custom token)
+                        this.firebaseSignInFailed = true;
                         await this.refreshToken()
 
                         // Wait a bit for Firebase to reinitialize
@@ -834,19 +811,16 @@ export default class Retter {
             const tokenData = this.formatTokenData(response.data)
             await this.storeTokenData(tokenData)
 
-            // Firebase custom token'ı da yenile (token refresh edildiğinde yeni custom token gelir)
-            if (tokenData.firebase?.customToken) {
+            if (tokenData.firebase?.customToken && this.firebaseSignInFailed) {
                 try {
                     await this.initFirebase(tokenData)
                 } catch (firebaseError) {
                     console.log('[RetterSDK] refreshToken: Failed to reinitialize Firebase after token refresh:', firebaseError)
-                    // Firebase init hatası token refresh'i başarısız yapmamalı
                 }
             }
 
             return tokenData
         } catch (error: any) {
-
             if (this.isNetworkError(error)) {
                 const authEvent = {
                     authStatus: RetterAuthStatus.CONNECTION_FAILED,
