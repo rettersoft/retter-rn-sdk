@@ -134,6 +134,19 @@ export default class Retter {
             const accessTokenDecoded = tokens?.accessTokenDecoded
 
             if (accessTokenDecoded && accessTokenDecoded.exp < safeNow) {
+                // Check if refresh token is also expired before attempting refresh
+                const refreshTokenDecoded = tokens?.refreshTokenDecoded
+                if (refreshTokenDecoded && refreshTokenDecoded.exp < safeNow) {
+                    console.log('[RetterSDK] makeAPIRequest: Both access and refresh tokens expired, signing out')
+                    await this.signOut('Session expired')
+                    this.fireAuthStatusChangedEvent({
+                        authStatus: RetterAuthStatus.SIGNED_OUT,
+                        message: 'Session expired - please login again',
+                    })
+                    throw new Error('Session expired - please login again')
+                }
+
+                // If there's already a refresh in progress, wait for it
                 if (this.refreshTokenPromise) {
                     try {
                         const newTokenData = await this.refreshTokenPromise
@@ -155,19 +168,18 @@ export default class Retter {
                         throw error
                     }
                 }
-                this.refreshTokenPromise = (async () => {
-                    try {
-                        const response = await this.refreshToken()
-                        this.refreshTokenPromise = null
-                        return response.accessToken
-                    } catch (error) {
-                        this.refreshTokenPromise = null
-                        throw error
-                    }
-                })()
+
+                // Create a new refresh promise - cleanup happens AFTER await completes
+                const refreshPromise = this.refreshToken()
+                    .then((response) => response.accessToken)
+
+                this.refreshTokenPromise = refreshPromise
 
                 try {
-                    const newToken = await this.refreshTokenPromise
+                    const newToken = await refreshPromise
+                    // Cleanup after successful await - this ensures other waiters get the value first
+                    this.refreshTokenPromise = null
+
                     if (!newToken) {
                         this.fireAuthStatusChangedEvent({
                             authStatus: RetterAuthStatus.SIGNED_OUT,
@@ -182,27 +194,16 @@ export default class Retter {
                     }
                     return await this.executeRequest(endpoint, newData)
                 } catch (error) {
+                    // Cleanup on error as well
+                    this.refreshTokenPromise = null
                     throw error
                 }
-
-
-                // try {
-                //     const response = await this.refreshToken();
-                //     const newData = { ...data };
-                //     newData.headers = {
-                //         ...newData.headers,
-                //         Authorization: `Bearer ${response?.accessToken}`,
-                //     }
-                //     return await this.executeRequest(endpoint, newData)
-                // } catch (err) {
-                //     throw err
-                // }
             } else {
                 const newData = { ...data }
-                if (tokens?.accessToken !== 'undefined' && tokens?.accessToken !== 'null' && tokens?.accessToken) {
+                if (this.isValidToken(tokens?.accessToken)) {
                     newData.headers = {
                         ...newData.headers,
-                        Authorization: `Bearer ${tokens.accessToken}`,
+                        Authorization: `Bearer ${tokens!.accessToken}`,
                     }
                 } else {
                     this.fireAuthStatusChangedEvent({
@@ -402,9 +403,17 @@ export default class Retter {
                 hasError = true
 
                 // Try to refresh token and recreate listener once
-                if (!retryAttempted) {
+                if (!retryAttempted && listenerKey) {
                     retryAttempted = true
                     console.log('[RetterSDK] getFirebaseListener: Permission denied, attempting to refresh Firebase auth')
+
+                    // Mark listener as being recreated to prevent race conditions
+                    const recreatingKey = `${listenerKey}_recreating`
+                    if (this.listeners[recreatingKey]) {
+                        console.log('[RetterSDK] getFirebaseListener: Listener already being recreated, skipping')
+                        return
+                    }
+                    this.listeners[recreatingKey] = true
 
                     try {
                         this.firebaseSignInFailed = true;
@@ -415,15 +424,16 @@ export default class Retter {
 
                         // Check if auth is now valid
                         const newAuthInstance = getAuth()
-                        if (newAuthInstance.currentUser && listenerKey) {
-                            // Unsubscribe old listener
+                        if (newAuthInstance.currentUser) {
+                            // Unsubscribe old listener first
                             unsubscribe()
+
+                            // Clean up old listener reference
                             if (this.listeners[listenerKey]) {
                                 delete this.listeners[listenerKey]
                             }
 
                             // Recreate listener with refreshed auth
-                            // Firebase will automatically send the current document snapshot when listener is created
                             console.log('[RetterSDK] getFirebaseListener: Recreating listener, will receive current document state')
                             const newListener = this.getFirebaseListener(
                                 queue,
@@ -432,11 +442,14 @@ export default class Retter {
                                 listenerKey
                             )
                             this.listeners[listenerKey] = newListener
-                            return
                         }
                     } catch (refreshError) {
                         console.log('[RetterSDK] getFirebaseListener: Failed to refresh Firebase auth:', refreshError)
+                    } finally {
+                        // Always clean up recreation flag
+                        delete this.listeners[recreatingKey]
                     }
+                    return
                 }
 
                 // If refresh failed or already attempted, clean up listener
@@ -700,6 +713,13 @@ export default class Retter {
     // #endregion
 
 
+    private isValidToken(token: string | undefined | null): boolean {
+        return typeof token === 'string' &&
+            token.length > 0 &&
+            token !== 'undefined' &&
+            token !== 'null'
+    }
+
     private isNetworkError(error: any): boolean {
         return error.code === 'NETWORK_ERROR' ||
             error.code === 'ECONNABORTED' ||
@@ -710,10 +730,15 @@ export default class Retter {
     }
 
     private isAuthError(error: any): boolean {
-        return error.message?.includes("Unexpected error occured in TOKEN") ||
+        const message = error.message || ''
+        const responseMessage = error.response?.data?.message || ''
+
+        return message.includes("Unexpected error occured in TOKEN") ||
+            message.includes('jwt expired') ||
+            responseMessage.includes('jwt expired') ||
             (error.response && error.response.status === 401) ||
             (error.response && error.response.status === 403) ||
-            error.message?.includes('ACCESS_DENIED')
+            message.includes('ACCESS_DENIED')
     }
 
     private isServerError(error: any): boolean {
@@ -802,6 +827,13 @@ export default class Retter {
             const refreshToken = tokens?.refreshToken
             const accessToken = tokens?.accessToken
 
+            // Validate refresh token before attempting refresh
+            if (!this.isValidToken(refreshToken)) {
+                console.log('[RetterSDK] refreshToken: No valid refresh token available')
+                await this.signOut('No valid refresh token')
+                throw new Error('No valid refresh token available')
+            }
+
             const response = await this.axiosInstance!({
                 url: this.buildUrl(projectId, '/TOKEN/refresh'),
                 method: 'post',
@@ -836,11 +868,10 @@ export default class Retter {
             }
 
             if (this.isServerError(error)) {
-                const authEvent = {
-                    authStatus: RetterAuthStatus.CONNECTION_FAILED,
-                    message: 'Server error, retrying...',
-                }
-                this.fireAuthStatusChangedEvent(authEvent)
+                // Server error on refresh (500) - token is likely corrupt/invalid
+                // Sign out user to force fresh login
+                console.log(`[RetterSDK] refreshToken: Server error (${error.response?.status}), signing out user`)
+                await this.signOut('Token refresh failed - server error')
                 throw error
             }
 
@@ -887,6 +918,18 @@ export default class Retter {
 
     protected async storeTokenData(data: RetterTokenData): Promise<void> {
         if (typeof data === 'undefined') return
+
+        // Ensure decoded tokens and diff are stored for consistent reads
+        if (!data.accessTokenDecoded && data.accessToken) {
+            data.accessTokenDecoded = jwtDecode(data.accessToken)
+        }
+        if (!data.refreshTokenDecoded && data.refreshToken) {
+            data.refreshTokenDecoded = jwtDecode(data.refreshToken)
+        }
+        if (data.accessTokenDecoded?.iat && data.diff === undefined) {
+            data.diff = data.accessTokenDecoded.iat - Math.floor(Date.now() / 1000)
+        }
+
         await AsyncStorage.setItem(this.tokenStorageKey!, JSON.stringify(data))
     }
 
@@ -917,25 +960,23 @@ export default class Retter {
         try {
             const data = JSON.parse(item)
 
-            if (data.accessTokenDecoded && data.refreshTokenDecoded) return data;
+            // Decode tokens if not already decoded
+            if (!data.accessTokenDecoded && data.accessToken) {
+                data.accessTokenDecoded = jwtDecode(data.accessToken)
+            }
+            if (!data.refreshTokenDecoded && data.refreshToken) {
+                data.refreshTokenDecoded = jwtDecode(data.refreshToken)
+            }
 
-            data.accessTokenDecoded = jwtDecode(data.accessToken)
-            data.refreshTokenDecoded = jwtDecode(data.refreshToken)
+            // IMPORTANT: diff should ONLY be calculated when token is received from server
+            // (in formatTokenData/storeTokenData), NOT when reading from storage.
+            // If diff is missing from storage (old format), default to 0 for safety.
+            // This prevents incorrect time calculations that could cause jwt expired errors.
+            if (data.diff === undefined) {
+                data.diff = 0
+            }
+
             return data
-
-            // if (!data.accessTokenDecoded && data.accessToken) {
-            //     data.accessTokenDecoded = jwtDecode(data.accessToken)
-            // }
-            // if (!data.refreshTokenDecoded && data.refreshToken) {
-            //     data.refreshTokenDecoded = jwtDecode(data.refreshToken)
-            // }
-
-            // if (data.accessTokenDecoded?.iat) {
-            //     const currentTime = Math.floor(Date.now() / 1000)
-            //     data.diff = data.accessTokenDecoded.iat - currentTime
-            // }
-
-            // return data
         } catch (e) {
             return undefined
         }
