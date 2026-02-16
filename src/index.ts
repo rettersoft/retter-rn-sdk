@@ -137,8 +137,7 @@ export default class Retter {
                 // Check if refresh token is also expired before attempting refresh
                 const refreshTokenDecoded = tokens?.refreshTokenDecoded
                 if (refreshTokenDecoded && refreshTokenDecoded.exp < safeNow) {
-                    console.log('[RetterSDK] makeAPIRequest: Both access and refresh tokens expired, signing out')
-                    await this.signOut('Session expired')
+                    await this.signOut('makeAPIRequest: Both access and refresh tokens expired, signing out user')
                     this.fireAuthStatusChangedEvent({
                         authStatus: RetterAuthStatus.SIGNED_OUT,
                         message: 'Session expired - please login again',
@@ -829,8 +828,7 @@ export default class Retter {
 
             // Validate refresh token before attempting refresh
             if (!this.isValidToken(refreshToken)) {
-                console.log('[RetterSDK] refreshToken: No valid refresh token available')
-                await this.signOut('No valid refresh token')
+                await this.signOut('refreshToken: No valid refresh token available, signing out user')
                 throw new Error('No valid refresh token available')
             }
 
@@ -856,28 +854,27 @@ export default class Retter {
             if (this.isNetworkError(error)) {
                 const authEvent = {
                     authStatus: RetterAuthStatus.CONNECTION_FAILED,
-                    message: 'Network error, retrying...',
+                    message: 'RefreshToken => Network error',
                 }
                 this.fireAuthStatusChangedEvent(authEvent)
                 throw error
             }
 
             if (this.isAuthError(error)) {
-                await this.signOut(error.message, true)
+                await this.signOut(`refreshToken: Auth error (${error.message}), signing out user`, true)
                 throw error
             }
 
             if (this.isServerError(error)) {
                 // Server error on refresh (500) - token is likely corrupt/invalid
                 // Sign out user to force fresh login
-                console.log(`[RetterSDK] refreshToken: Server error (${error.response?.status}), signing out user`)
-                await this.signOut('Token refresh failed - server error', true)
+                await this.signOut(`refreshToken: Server error (${error.response?.status}), signing out user`, true)
                 throw error
             }
 
             const authEvent = {
                 authStatus: RetterAuthStatus.CONNECTION_FAILED,
-                message: error.message ?? 'Connection Failed',
+                message: error.message ?? 'RefreshToken => Connection Failed',
             }
             this.fireAuthStatusChangedEvent(authEvent)
             throw error
@@ -905,7 +902,7 @@ export default class Retter {
             await this.clearCloudObjects()
             this.fireAuthStatusChangedEvent({
                 authStatus: serviceFailed ? RetterAuthStatus.SERVICE_FAILED : RetterAuthStatus.SIGNED_OUT,
-                message: 'Signed out function called',
+                message: message || 'User signed out',
             })
         }
     }
