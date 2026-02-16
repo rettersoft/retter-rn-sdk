@@ -67,6 +67,7 @@ export enum RetterAuthStatus {
     SIGNED_OUT = 'SIGNED_OUT',
     AUTH_FAILED = 'AUTH_FAILED',
     CONNECTION_FAILED = 'CONNECTION_FAILED',
+    SERVICE_FAILED = 'SERVICE_FAILED',
 }
 
 export interface RetterAuthChangedEvent {

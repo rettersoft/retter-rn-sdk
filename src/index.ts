@@ -863,7 +863,7 @@ export default class Retter {
             }
 
             if (this.isAuthError(error)) {
-                await this.signOut(error.message)
+                await this.signOut(error.message, true)
                 throw error
             }
 
@@ -871,7 +871,7 @@ export default class Retter {
                 // Server error on refresh (500) - token is likely corrupt/invalid
                 // Sign out user to force fresh login
                 console.log(`[RetterSDK] refreshToken: Server error (${error.response?.status}), signing out user`)
-                await this.signOut('Token refresh failed - server error')
+                await this.signOut('Token refresh failed - server error', true)
                 throw error
             }
 
@@ -884,7 +884,7 @@ export default class Retter {
         }
     }
 
-    public async signOut(message?: string): Promise<void> {
+    public async signOut(message?: string, serviceFailed = false): Promise<void> {
         try {
             const tokenData = await this.getCurrentTokenData()
 
@@ -904,7 +904,7 @@ export default class Retter {
             await this.clearTokenData()
             await this.clearCloudObjects()
             this.fireAuthStatusChangedEvent({
-                authStatus: RetterAuthStatus.SIGNED_OUT,
+                authStatus: serviceFailed ? RetterAuthStatus.SERVICE_FAILED : RetterAuthStatus.SIGNED_OUT,
                 message: 'Signed out function called',
             })
         }
