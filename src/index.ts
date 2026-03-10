@@ -120,6 +120,46 @@ export default class Retter {
         this.axiosInstance! = axios.create(axiosConfig)
     }
 
+    private async getValidAccessToken(): Promise<string | null> {
+        const tokens = await this.getCurrentTokenData()
+
+        // No tokens — unauthenticated call (e.g. login)
+        if (!tokens || !this.isValidToken(tokens.accessToken)) {
+            return null
+        }
+
+        const now = Math.floor(Date.now() / 1000)
+        const safeNow = now + 30 + (tokens.diff ?? 0)
+        const accessTokenDecoded = tokens.accessTokenDecoded
+
+        // Token is still valid
+        if (!accessTokenDecoded || accessTokenDecoded.exp >= safeNow) {
+            return tokens.accessToken
+        }
+
+        // Access token expired - check refresh token
+        const refreshTokenDecoded = tokens.refreshTokenDecoded
+        if (refreshTokenDecoded && refreshTokenDecoded.exp < safeNow) {
+            await this.signOut('getValidAccessToken: Both tokens expired')
+            throw new Error('Session expired - please login again')
+        }
+
+        // Refresh needed - reuse existing promise or create new one
+        if (!this.refreshTokenPromise) {
+            this.refreshTokenPromise = this.refreshToken()
+                .then((response) => response.accessToken)
+                .finally(() => { this.refreshTokenPromise = null })
+        }
+
+        const newToken = await this.refreshTokenPromise
+        if (!newToken) {
+            await this.signOut('getValidAccessToken: Refresh returned empty token')
+            throw new Error('Token refresh failed - please login again')
+        }
+
+        return newToken
+    }
+
     protected async makeAPIRequest<T>(
         action: RetterActions,
         data: RetterCloudObjectConfig,
@@ -127,100 +167,51 @@ export default class Retter {
     ): Promise<RetterCallResponse<T>> {
         try {
             const endpoint = this.generateEndpoint(action, data)
-            const tokens = await this.getCurrentTokenData()
+            const accessToken = await this.getValidAccessToken()
 
-            const now = Math.floor(Date.now() / 1000)
-            const safeNow = now + 30 + (tokens?.diff ?? 0) // add server time diff
-            const accessTokenDecoded = tokens?.accessTokenDecoded
-
-            if (accessTokenDecoded && accessTokenDecoded.exp < safeNow) {
-                // Check if refresh token is also expired before attempting refresh
-                const refreshTokenDecoded = tokens?.refreshTokenDecoded
-                if (refreshTokenDecoded && refreshTokenDecoded.exp < safeNow) {
-                    await this.signOut('makeAPIRequest: Both access and refresh tokens expired, signing out user')
-                    this.fireAuthStatusChangedEvent({
-                        authStatus: RetterAuthStatus.SIGNED_OUT,
-                        message: 'Session expired - please login again',
-                    })
-                    throw new Error('Session expired - please login again')
+            const newData = { ...data }
+            if (accessToken) {
+                newData.headers = {
+                    ...newData.headers,
+                    Authorization: `Bearer ${accessToken}`,
                 }
+            }
 
-                // If there's already a refresh in progress, wait for it
-                if (this.refreshTokenPromise) {
-                    try {
-                        const newTokenData = await this.refreshTokenPromise
-                        if (!newTokenData) {
-                            this.fireAuthStatusChangedEvent({
-                                authStatus: RetterAuthStatus.SIGNED_OUT,
-                                message: 'Already have refreshTokenPromise => tokenData is undefined',
-                            })
-                            throw new Error('Access token is undefined.')
-                        }
-                        const newData = { ...data }
-                        newData.headers = {
-                            ...newData.headers,
-                            Authorization: `Bearer ${newTokenData}`,
-                        }
-
-                        return await this.executeRequest(endpoint, newData)
-                    } catch (error) {
-                        throw error
-                    }
-                }
-
-                // Create a new refresh promise - cleanup happens AFTER await completes
-                const refreshPromise = this.refreshToken()
-                    .then((response) => response.accessToken)
-
-                this.refreshTokenPromise = refreshPromise
-
+            return await this.executeRequest(endpoint, newData)
+        } catch (error: any) {
+            // 403/401 from server means token is invalid despite our local checks
+            // (e.g. token revoked server-side, clock skew, etc.)
+            if (this.isAuthError(error) && !this.isAuthErrorHandled(retryCount)) {
+                // Force refresh token and retry once
+                this.refreshTokenPromise = null // Clear any stale promise
                 try {
-                    const newToken = await refreshPromise
-                    // Cleanup after successful await - this ensures other waiters get the value first
-                    this.refreshTokenPromise = null
-
-                    if (!newToken) {
-                        this.fireAuthStatusChangedEvent({
-                            authStatus: RetterAuthStatus.SIGNED_OUT,
-                            message: 'First time refreshTokenPromise => tokenData is undefined',
-                        })
-                        throw new Error('Access token is undefined.')
-                    }
+                    const tokenData = await this.refreshToken()
                     const newData = { ...data }
                     newData.headers = {
                         ...newData.headers,
-                        Authorization: `Bearer ${newToken}`,
+                        Authorization: `Bearer ${tokenData.accessToken}`,
                     }
+                    const endpoint = this.generateEndpoint(action, data)
                     return await this.executeRequest(endpoint, newData)
-                } catch (error) {
-                    // Cleanup on error as well
-                    this.refreshTokenPromise = null
-                    throw error
+                } catch (refreshError) {
+                    // Refresh failed - user session is truly invalid
+                    // signOut is already called inside refreshToken on auth/server errors
+                    throw error // throw original error
                 }
-            } else {
-                const newData = { ...data }
-                if (this.isValidToken(tokens?.accessToken)) {
-                    newData.headers = {
-                        ...newData.headers,
-                        Authorization: `Bearer ${tokens!.accessToken}`,
-                    }
-                } else {
-                    this.fireAuthStatusChangedEvent({
-                        authStatus: RetterAuthStatus.SIGNED_OUT,
-                        message: 'Access token is undefined',
-                    })
-                }
-                return await this.executeRequest(endpoint, newData)
             }
-        } catch (error) {
+
             if (this.isRetryableError(error) && retryCount < 3) {
-                const delay = Math.min(1000 * Math.pow(2, retryCount), 5000) // Exponential backoff, max 5s
+                const delay = Math.min(1000 * Math.pow(2, retryCount), 5000)
                 await new Promise(resolve => setTimeout(resolve, delay))
                 return this.makeAPIRequest(action, data, retryCount + 1)
             }
             throw error
         }
+    }
 
+    private isAuthErrorHandled(retryCount: number): boolean {
+        // Only handle auth error once (retryCount === 0 means first attempt)
+        return retryCount > 0
     }
 
     protected async executeRequest(
@@ -255,14 +246,6 @@ export default class Retter {
                     resolve(response)
                 })
                 .catch((error) => {
-                    // if (
-                    //     error.response &&
-                    //     error.response.status === 403 &&
-                    //     error.response.data &&
-                    //     error.response.data.code === 'ACCESS_DENIED'
-                    // ) {
-                    //     this.signOut()
-                    // }
                     reject(error)
                 })
         })
@@ -766,26 +749,60 @@ export default class Retter {
     // #region Auth
     protected async initAuth() {
         const tokens = await this.getCurrentTokenData()
-        if (tokens) {
-            try {
-                const firebaseResult = await this.initFirebase(tokens)
-                if (firebaseResult instanceof Error) {
-                    // console.warn('[RetterSDK] initAuth: Firebase initialization failed, signing out user')
-                }
-
-                this.fireAuthStatusChangedEvent({
-                    authStatus: RetterAuthStatus.SIGNED_IN,
-                    uid: tokens.accessTokenDecoded?.userId,
-                    identity: tokens.accessTokenDecoded?.identity,
-                })
-            } catch (error) {
-                console.error('[RetterSDK] initAuth: Auth initialization error:', error)
-            }
-        } else {
+        if (!tokens) {
             this.fireAuthStatusChangedEvent({
                 authStatus: RetterAuthStatus.SIGNED_OUT,
                 message: 'First Init access token is undefined',
             })
+            return
+        }
+
+        try {
+            const now = Math.floor(Date.now() / 1000)
+            const safeNow = now + 30 + (tokens.diff ?? 0)
+
+            // Check if refresh token is expired — if so, session is dead
+            const refreshTokenDecoded = tokens.refreshTokenDecoded
+            if (refreshTokenDecoded && refreshTokenDecoded.exp < safeNow) {
+                console.log('[RetterSDK] initAuth: Refresh token expired, signing out')
+                await this.clearTokenData()
+                await this.clearCloudObjects()
+                this.fireAuthStatusChangedEvent({
+                    authStatus: RetterAuthStatus.SIGNED_OUT,
+                    message: 'Session expired - refresh token is no longer valid',
+                })
+                return
+            }
+
+            // If access token expired but refresh token is valid, refresh now
+            const accessTokenDecoded = tokens.accessTokenDecoded
+            if (accessTokenDecoded && accessTokenDecoded.exp < safeNow) {
+                console.log('[RetterSDK] initAuth: Access token expired, refreshing before init')
+                try {
+                    const newTokenData = await this.refreshToken()
+                    await this.initFirebase(newTokenData)
+                    this.fireAuthStatusChangedEvent({
+                        authStatus: RetterAuthStatus.SIGNED_IN,
+                        uid: newTokenData.accessTokenDecoded?.userId,
+                        identity: newTokenData.accessTokenDecoded?.identity,
+                    })
+                    return
+                } catch (refreshError) {
+                    console.log('[RetterSDK] initAuth: Token refresh failed during init:', refreshError)
+                    // refreshToken already handles signOut on auth/server errors
+                    return
+                }
+            }
+
+            // Token is still valid
+            await this.initFirebase(tokens)
+            this.fireAuthStatusChangedEvent({
+                authStatus: RetterAuthStatus.SIGNED_IN,
+                uid: tokens.accessTokenDecoded?.userId,
+                identity: tokens.accessTokenDecoded?.identity,
+            })
+        } catch (error) {
+            console.error('[RetterSDK] initAuth: Auth initialization error:', error)
         }
     }
 
