@@ -22,10 +22,11 @@ import jwtDecode from 'jwt-decode'
 import { getFirestore, doc, onSnapshot } from '@react-native-firebase/firestore'
 import { getAuth, signInWithCustomToken, signOut } from '@react-native-firebase/auth'
 import axios, { AxiosInstance, AxiosRequestConfig } from 'axios'
-// import { Agent } from 'https'
 import { base64Encode, getInstallationId, sort } from './helpers'
+import { setupSslPinning } from './ssl-pinning'
 
 export * from './types'
+export { AMAZON_ROOT_CA_HASHES } from './ssl-pinning'
 
 const DEFAULT_RETRY_DELAY = 50 // in ms
 const DEFAULT_RETRY_COUNT = 3
@@ -61,7 +62,7 @@ export default class Retter {
 
     private firebaseSignInFailed = false;
 
-    private sslPinningEnabled: boolean = true
+    private sslPinningReady: Promise<void> = Promise.resolve()
 
     protected axiosInstance?: AxiosInstance
 
@@ -94,6 +95,7 @@ export default class Retter {
             this.clientConfig.retryConfig.rate = DEFAULT_RETRY_RATE
 
 
+        this.sslPinningReady = setupSslPinning(config)
         this.createAxiosInstance()
         this.authStatusSubject = new Observable<RetterAuthChangedEvent>(
             () => {
@@ -113,10 +115,6 @@ export default class Retter {
             timeout: 30000,
         }
 
-        if (this.sslPinningEnabled === false) {
-            // axiosConfig.httpsAgent = new Agent({ rejectUnauthorized: false })
-        }
-
         this.axiosInstance! = axios.create(axiosConfig)
     }
 
@@ -125,6 +123,7 @@ export default class Retter {
         data: RetterCloudObjectConfig,
         retryCount: number = 0
     ): Promise<RetterCallResponse<T>> {
+        await this.sslPinningReady
         try {
             const endpoint = this.generateEndpoint(action, data)
             const tokens = await this.getCurrentTokenData()
@@ -792,6 +791,7 @@ export default class Retter {
     public async authenticateWithCustomToken(
         token: string
     ): Promise<RetterAuthChangedEvent> {
+        await this.sslPinningReady
         if (!this.clientConfig) throw new Error('Client config not found.')
         const { projectId } = this.clientConfig
 
@@ -818,6 +818,7 @@ export default class Retter {
     }
 
     protected async refreshToken(): Promise<RetterTokenData> {
+        await this.sslPinningReady
         if (!this.clientConfig) throw new Error('Client config not found.')
         const { projectId } = this.clientConfig
 
@@ -882,6 +883,7 @@ export default class Retter {
     }
 
     public async signOut(message?: string, serviceFailed = false): Promise<void> {
+        await this.sslPinningReady
         try {
             const tokenData = await this.getCurrentTokenData()
 

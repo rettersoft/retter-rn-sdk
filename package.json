@@ -24,7 +24,8 @@
         "@react-native-firebase/auth": ">=18.0.0",
         "@react-native-firebase/firestore": ">=18.0.0",
         "react": ">=16.8.0",
-        "react-native": ">=0.60.0"
+        "react-native": ">=0.60.0",
+        "react-native-ssl-public-key-pinning": ">=1.0.0"
     },
     "peerDependenciesMeta": {
         "@react-native-async-storage/async-storage": {
@@ -44,6 +45,9 @@
         },
         "@react-native-firebase/auth": {
             "optional": false
+        },
+        "react-native-ssl-public-key-pinning": {
+            "optional": true
         }
     },
     "dependencies": {
