@@ -11,7 +11,19 @@ export interface RetterClientConfig {
     culture?: string
     retryConfig?: RetterRetryConfig
     sslPinningEnabled?: boolean
+    storage?: RetterStorage
     [key: string]: any
+}
+
+// Storage
+// Pluggable async key/value store used for sensitive auth data. Pass an
+// expo-secure-store / Keychain-backed adapter to keep tokens out of plain
+// AsyncStorage. When omitted the SDK falls back to AsyncStorage for backward
+// compatibility — not recommended for apps storing JWT/PII.
+export interface RetterStorage {
+    getItem(key: string): Promise<string | null>
+    setItem(key: string, value: string): Promise<void>
+    removeItem(key: string): Promise<void>
 }
 
 export interface RetterRetryConfig {

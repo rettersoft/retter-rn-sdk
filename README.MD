@@ -59,6 +59,7 @@ interface RetterClientConfig {
     region?: RetterRegion
     platform?: string
     culture?: string
+    storage?: RetterStorage
 }
 ```
 
@@ -69,6 +70,36 @@ interface RetterClientConfig {
 > **platform**: ios, android, web, ...
 >
 > **culture**: tr, en-US, vs....
+>
+> **storage**: Optional async key/value adapter used to persist auth tokens. Defaults to AsyncStorage for backward compatibility, but **JWTs and Firebase custom tokens should be kept in a secure store** (iOS Keychain / Android Keystore). See below.
+
+### Secure Token Storage
+
+By default the SDK persists access/refresh tokens via `AsyncStorage`. On rooted/jailbroken devices these are readable in plain text. Pass a SecureStore-backed adapter to keep them encrypted at rest:
+
+```ts
+import * as SecureStore from 'expo-secure-store'
+import Retter, { RetterStorage } from '@retter/rn-sdk'
+
+const secureStorage: RetterStorage = {
+    getItem: (key) => SecureStore.getItemAsync(key),
+    setItem: (key, value) => SecureStore.setItemAsync(key, value),
+    removeItem: (key) => SecureStore.deleteItemAsync(key),
+}
+
+const rio = Retter.getInstance({
+    projectId: 'YOUR_PROJECT_ID',
+    storage: secureStorage,
+})
+```
+
+For non-Expo projects, `react-native-keychain` works just as well — wrap its `getGenericPassword` / `setGenericPassword` / `resetGenericPassword` in the same `RetterStorage` shape.
+
+**Migration:** when an existing app upgrades to 0.7.5+, the SDK reads the old plaintext blob from AsyncStorage on first launch, writes it to the configured storage and deletes the AsyncStorage entry. Users stay signed in.
+
+**iOS Keychain accessibility:** `expo-secure-store` defaults to `WHEN_UNLOCKED_THIS_DEVICE_ONLY`, which closes audit finding MA-15 (no further config needed). If you want biometric/PIN gating on every token read, pass `requireAuthentication: true` from your adapter — note this prompts Face ID on every API call and significantly impacts UX.
+
+**Android note:** SecureStore values are limited to ~2 KB. The SDK splits its payload across two keys (`RIO_AUTH.<projectId>` and `RIO_FB.<projectId>`) and stores only the raw tokens + clock-skew offset; decoded JWT payloads are reconstructed on read.
 
 ### Authentication
 

@@ -15,6 +15,7 @@ import {
     RetterCloudObjectStaticCall,
     RetterRegion,
     RetterRegionConfig,
+    RetterStorage,
     RetterTokenData,
     RetterTokenPayload,
 } from './types'
@@ -31,6 +32,14 @@ export { AMAZON_ROOT_CA_HASHES } from './ssl-pinning'
 const DEFAULT_RETRY_DELAY = 50 // in ms
 const DEFAULT_RETRY_COUNT = 3
 const DEFAULT_RETRY_RATE = 1.5
+
+// Backward-compatible fallback. Apps holding sensitive tokens should pass
+// a SecureStore/Keychain-backed adapter via `config.storage`.
+const defaultStorage: RetterStorage = {
+    getItem: (key) => AsyncStorage.getItem(key),
+    setItem: (key, value) => AsyncStorage.setItem(key, value),
+    removeItem: (key) => AsyncStorage.removeItem(key),
+}
 
 const RetterRegions: RetterRegionConfig[] = [
     {
@@ -54,7 +63,17 @@ export default class Retter {
 
     private listeners: { [key: string]: any } = {}
 
-    private tokenStorageKey?: string
+    // Auth payload (access/refresh + clock skew). Kept under SecureStore's
+    // 2 KB Android limit by splitting Firebase data into a separate key.
+    private authStorageKey?: string
+
+    // Firebase custom-token + project metadata.
+    private firebaseStorageKey?: string
+
+    // Pre-0.7.5 single-blob key in AsyncStorage; only read for one-shot migration.
+    private legacyTokenStorageKey?: string
+
+    private storage: RetterStorage = defaultStorage
 
     private authStatusSubject: Observable<RetterAuthChangedEvent>
 
@@ -82,7 +101,11 @@ export default class Retter {
         this.initialized = true
         this.clientConfig = config
 
-        this.tokenStorageKey = `RIO_TOKENS_KEY.${config.projectId}`
+        this.authStorageKey = `RIO_AUTH.${config.projectId}`
+        this.firebaseStorageKey = `RIO_FB.${config.projectId}`
+        this.legacyTokenStorageKey = `RIO_TOKENS_KEY.${config.projectId}`
+        if (config.storage) this.storage = config.storage
+        console.log(`[RetterSDK][storage] init projectId=${config.projectId} adapter=${config.storage ? 'custom (provided by app)' : 'AsyncStorage (default fallback)'}`)
         if (!this.clientConfig.region)
             this.clientConfig.region = RetterRegion.euWest1
 
@@ -146,6 +169,7 @@ export default class Retter {
         if (!this.refreshTokenPromise) {
             this.refreshTokenPromise = this.refreshToken()
                 .then((response) => response.accessToken)
+                //@ts-ignore
                 .finally(() => { this.refreshTokenPromise = null })
         }
 
@@ -665,9 +689,10 @@ export default class Retter {
     protected async clearCloudObjects(shouldSignOut: boolean = true) {
         try {
             // Clear listeners
+            //@ts-ignore
             const listeners = Object.values(this.listeners)
             if (listeners.length > 0) {
-                listeners.map((i) => i())
+                listeners.map((i: any) => i())
 
                 this.cloudObjects.map((i) => {
                     i.state?.role.queue?.complete()
@@ -934,23 +959,52 @@ export default class Retter {
 
     protected async storeTokenData(data: RetterTokenData): Promise<void> {
         if (typeof data === 'undefined') return
+        if (!this.authStorageKey || !this.firebaseStorageKey)
+            throw new Error('Token storage keys not initialized.')
 
-        // Ensure decoded tokens and diff are stored for consistent reads
-        if (!data.accessTokenDecoded && data.accessToken) {
-            data.accessTokenDecoded = jwtDecode(data.accessToken)
-        }
-        if (!data.refreshTokenDecoded && data.refreshToken) {
-            data.refreshTokenDecoded = jwtDecode(data.refreshToken)
-        }
-        if (data.accessTokenDecoded?.iat && data.diff === undefined) {
-            data.diff = data.accessTokenDecoded.iat - Math.floor(Date.now() / 1000)
+        // Persist only the minimal fields needed to reconstruct everything else.
+        // Keeps each SecureStore item under the 2 KB Android limit; decoded
+        // payloads and ExpiresAt are derived on read.
+        const accessTokenDecoded =
+            data.accessTokenDecoded ??
+            (data.accessToken ? jwtDecode<RetterTokenPayload>(data.accessToken) : undefined)
+
+        const diff =
+            data.diff ??
+            (accessTokenDecoded?.iat
+                ? accessTokenDecoded.iat - Math.floor(Date.now() / 1000)
+                : 0)
+
+        const auth = {
+            accessToken: data.accessToken,
+            refreshToken: data.refreshToken,
+            diff,
         }
 
-        await AsyncStorage.setItem(this.tokenStorageKey!, JSON.stringify(data))
+        const authJson = JSON.stringify(auth)
+        const firebaseJson = data.firebase ? JSON.stringify(data.firebase) : null
+        console.log(`[RetterSDK][storage] write auth=${authJson.length}B firebase=${firebaseJson ? firebaseJson.length + 'B' : 'none'} keys=${this.authStorageKey},${this.firebaseStorageKey}`)
+
+        await Promise.all([
+            this.storage.setItem(this.authStorageKey, authJson),
+            firebaseJson
+                ? this.storage.setItem(this.firebaseStorageKey, firebaseJson)
+                : this.storage.removeItem(this.firebaseStorageKey),
+        ])
     }
 
     protected async clearTokenData(): Promise<void> {
-        await AsyncStorage.removeItem(this.tokenStorageKey!)
+        if (!this.authStorageKey || !this.firebaseStorageKey || !this.legacyTokenStorageKey)
+            throw new Error('Token storage keys not initialized.')
+
+        console.log(`[RetterSDK][storage] clear keys=${this.authStorageKey},${this.firebaseStorageKey},${this.legacyTokenStorageKey}`)
+
+        await Promise.all([
+            this.storage.removeItem(this.authStorageKey),
+            this.storage.removeItem(this.firebaseStorageKey),
+            // Clean up legacy AsyncStorage blob in case migration ran on a previous launch.
+            AsyncStorage.removeItem(this.legacyTokenStorageKey).catch(() => {}),
+        ])
     }
 
     protected formatTokenData(tokenData: RetterTokenData): RetterTokenData {
@@ -968,33 +1022,104 @@ export default class Retter {
     protected async getCurrentTokenData(): Promise<
         RetterTokenData | undefined
     > {
-        if (!this.tokenStorageKey)
-            throw new Error('Token storage key not found.')
-        const item = await AsyncStorage.getItem(this.tokenStorageKey)
-        if (!item) return undefined
+        if (!this.authStorageKey || !this.firebaseStorageKey || !this.legacyTokenStorageKey)
+            throw new Error('Token storage keys not initialized.')
+
+        const [authRaw, firebaseRaw] = await Promise.all([
+            this.storage.getItem(this.authStorageKey),
+            this.storage.getItem(this.firebaseStorageKey),
+        ])
+
+        console.log(`[RetterSDK][storage] read auth=${authRaw ? 'hit' : 'miss'} firebase=${firebaseRaw ? 'hit' : 'miss'}`)
+
+        if (!authRaw) {
+            const migrated = await this.migrateLegacyTokenData()
+            return migrated
+        }
 
         try {
-            const data = JSON.parse(item)
-
-            // Decode tokens if not already decoded
-            if (!data.accessTokenDecoded && data.accessToken) {
-                data.accessTokenDecoded = jwtDecode(data.accessToken)
+            const auth = JSON.parse(authRaw) as {
+                accessToken: string
+                refreshToken: string
+                diff?: number
             }
-            if (!data.refreshTokenDecoded && data.refreshToken) {
-                data.refreshTokenDecoded = jwtDecode(data.refreshToken)
-            }
+            const firebase = firebaseRaw ? JSON.parse(firebaseRaw) : undefined
 
-            // IMPORTANT: diff should ONLY be calculated when token is received from server
-            // (in formatTokenData/storeTokenData), NOT when reading from storage.
-            // If diff is missing from storage (old format), default to 0 for safety.
-            // This prevents incorrect time calculations that could cause jwt expired errors.
-            if (data.diff === undefined) {
-                data.diff = 0
-            }
-
-            return data
+            return this.hydrateTokenData(auth.accessToken, auth.refreshToken, firebase, auth.diff)
         } catch (e) {
             return undefined
+        }
+    }
+
+    // Reads pre-0.7.5 single-blob token from AsyncStorage and migrates it to
+    // the configured (typically secure) storage. Removes the legacy entry
+    // afterwards so plaintext tokens don't linger.
+    private async migrateLegacyTokenData(): Promise<RetterTokenData | undefined> {
+        if (!this.legacyTokenStorageKey) return undefined
+
+        let legacyRaw: string | null = null
+        try {
+            legacyRaw = await AsyncStorage.getItem(this.legacyTokenStorageKey)
+        } catch {
+            return undefined
+        }
+        if (!legacyRaw) {
+            console.log(`[RetterSDK][storage] migration: no legacy blob at ${this.legacyTokenStorageKey} (clean install or already migrated)`)
+            return undefined
+        }
+
+        try {
+            const legacy = JSON.parse(legacyRaw)
+            if (!legacy?.accessToken || !legacy?.refreshToken) {
+                console.log(`[RetterSDK][storage] migration: legacy blob present but malformed, skipping`)
+                return undefined
+            }
+
+            console.log(`[RetterSDK][storage] migration: legacy blob found (${legacyRaw.length}B), moving to configured storage`)
+
+            const hydrated = this.hydrateTokenData(
+                legacy.accessToken,
+                legacy.refreshToken,
+                legacy.firebase,
+                legacy.diff,
+            )
+
+            await this.storeTokenData(hydrated)
+            await AsyncStorage.removeItem(this.legacyTokenStorageKey).catch(() => {})
+
+            console.log(`[RetterSDK][storage] migration: complete, legacy AsyncStorage entry removed`)
+
+            return hydrated
+        } catch (e) {
+            console.log(`[RetterSDK][storage] migration: failed`, e)
+            return undefined
+        }
+    }
+
+    private hydrateTokenData(
+        accessToken: string,
+        refreshToken: string,
+        firebase: RetterTokenData['firebase'] | undefined,
+        diff: number | undefined,
+    ): RetterTokenData {
+        const accessTokenDecoded = accessToken
+            ? jwtDecode<RetterTokenPayload>(accessToken)
+            : undefined
+        const refreshTokenDecoded = refreshToken
+            ? jwtDecode<RetterTokenPayload>(refreshToken)
+            : undefined
+
+        return {
+            accessToken,
+            refreshToken,
+            firebase: firebase as RetterTokenData['firebase'],
+            accessTokenDecoded,
+            refreshTokenDecoded,
+            // diff is the clock skew captured at receive-time; cannot be
+            // recomputed on read. Default to 0 if missing (legacy format).
+            diff: typeof diff === 'number' ? diff : 0,
+            accessTokenExpiresAt: accessTokenDecoded?.exp ?? 0,
+            refreshTokenExpiresAt: refreshTokenDecoded?.exp ?? 0,
         }
     }
 
