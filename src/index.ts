@@ -105,7 +105,6 @@ export default class Retter {
         this.firebaseStorageKey = `RIO_FB.${config.projectId}`
         this.legacyTokenStorageKey = `RIO_TOKENS_KEY.${config.projectId}`
         if (config.storage) this.storage = config.storage
-        console.log(`[RetterSDK][storage] init projectId=${config.projectId} adapter=${config.storage ? 'custom (provided by app)' : 'AsyncStorage (default fallback)'}`)
         if (!this.clientConfig.region)
             this.clientConfig.region = RetterRegion.euWest1
 
@@ -981,14 +980,10 @@ export default class Retter {
             diff,
         }
 
-        const authJson = JSON.stringify(auth)
-        const firebaseJson = data.firebase ? JSON.stringify(data.firebase) : null
-        console.log(`[RetterSDK][storage] write auth=${authJson.length}B firebase=${firebaseJson ? firebaseJson.length + 'B' : 'none'} keys=${this.authStorageKey},${this.firebaseStorageKey}`)
-
         await Promise.all([
-            this.storage.setItem(this.authStorageKey, authJson),
-            firebaseJson
-                ? this.storage.setItem(this.firebaseStorageKey, firebaseJson)
+            this.storage.setItem(this.authStorageKey, JSON.stringify(auth)),
+            data.firebase
+                ? this.storage.setItem(this.firebaseStorageKey, JSON.stringify(data.firebase))
                 : this.storage.removeItem(this.firebaseStorageKey),
         ])
     }
@@ -996,8 +991,6 @@ export default class Retter {
     protected async clearTokenData(): Promise<void> {
         if (!this.authStorageKey || !this.firebaseStorageKey || !this.legacyTokenStorageKey)
             throw new Error('Token storage keys not initialized.')
-
-        console.log(`[RetterSDK][storage] clear keys=${this.authStorageKey},${this.firebaseStorageKey},${this.legacyTokenStorageKey}`)
 
         await Promise.all([
             this.storage.removeItem(this.authStorageKey),
@@ -1030,8 +1023,6 @@ export default class Retter {
             this.storage.getItem(this.firebaseStorageKey),
         ])
 
-        console.log(`[RetterSDK][storage] read auth=${authRaw ? 'hit' : 'miss'} firebase=${firebaseRaw ? 'hit' : 'miss'}`)
-
         if (!authRaw) {
             const migrated = await this.migrateLegacyTokenData()
             return migrated
@@ -1063,19 +1054,11 @@ export default class Retter {
         } catch {
             return undefined
         }
-        if (!legacyRaw) {
-            console.log(`[RetterSDK][storage] migration: no legacy blob at ${this.legacyTokenStorageKey} (clean install or already migrated)`)
-            return undefined
-        }
+        if (!legacyRaw) return undefined
 
         try {
             const legacy = JSON.parse(legacyRaw)
-            if (!legacy?.accessToken || !legacy?.refreshToken) {
-                console.log(`[RetterSDK][storage] migration: legacy blob present but malformed, skipping`)
-                return undefined
-            }
-
-            console.log(`[RetterSDK][storage] migration: legacy blob found (${legacyRaw.length}B), moving to configured storage`)
+            if (!legacy?.accessToken || !legacy?.refreshToken) return undefined
 
             const hydrated = this.hydrateTokenData(
                 legacy.accessToken,
@@ -1087,11 +1070,8 @@ export default class Retter {
             await this.storeTokenData(hydrated)
             await AsyncStorage.removeItem(this.legacyTokenStorageKey).catch(() => {})
 
-            console.log(`[RetterSDK][storage] migration: complete, legacy AsyncStorage entry removed`)
-
             return hydrated
-        } catch (e) {
-            console.log(`[RetterSDK][storage] migration: failed`, e)
+        } catch {
             return undefined
         }
     }
