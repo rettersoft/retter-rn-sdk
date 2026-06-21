@@ -771,7 +771,18 @@ export default class Retter {
 
     // #region Auth
     protected async initAuth() {
-        const tokens = await this.getCurrentTokenData()
+        let tokens
+        try {
+            tokens = await this.getCurrentTokenData()
+        } catch (error) {
+            console.log('[RetterSDK] initAuth: Failed to read token data:', error)
+            this.fireAuthStatusChangedEvent({
+                authStatus: RetterAuthStatus.SIGNED_OUT,
+                message: 'Token storage read failed',
+            })
+            return
+        }
+
         if (!tokens) {
             this.fireAuthStatusChangedEvent({
                 authStatus: RetterAuthStatus.SIGNED_OUT,
@@ -1016,12 +1027,20 @@ export default class Retter {
         RetterTokenData | undefined
     > {
         if (!this.authStorageKey || !this.firebaseStorageKey || !this.legacyTokenStorageKey)
-            throw new Error('Token storage keys not initialized.')
+        throw new Error('Token storage keys not initialized.')
 
-        const [authRaw, firebaseRaw] = await Promise.all([
-            this.storage.getItem(this.authStorageKey),
-            this.storage.getItem(this.firebaseStorageKey),
-        ])
+        let authRaw: string | null = null
+        let firebaseRaw: string | null = null
+        try {
+            [authRaw, firebaseRaw] = await Promise.all([
+                this.storage.getItem(this.authStorageKey),
+                this.storage.getItem(this.firebaseStorageKey),
+            ])
+        } catch (error) {
+            console.log('[RetterSDK] getCurrentTokenData: Storage read failed, treating as signed out:', error)
+            return undefined
+        }
+
 
         if (!authRaw) {
             const migrated = await this.migrateLegacyTokenData()
