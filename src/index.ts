@@ -1130,5 +1130,24 @@ export default class Retter {
         return this.authStatusSubject
     }
 
+    public async resetAuthState(message?: string): Promise<void> {
+        try {
+            await this.clearTokenData()
+        } catch (error) {
+            console.log('[RetterSDK] resetAuthState: clearTokenData failed', error)
+        }
+        try {
+            await this.clearCloudObjects(false) 
+        } catch (error) {
+            console.log('[RetterSDK] resetAuthState: clearCloudObjects failed', error)
+        }
+        this.refreshTokenPromise = null
+        this.firebaseSignInFailed = false
+        this.fireAuthStatusChangedEvent({
+            authStatus: RetterAuthStatus.SIGNED_OUT,
+            message: message || 'Auth state reset',
+        })
+    }
+
     // #endregion
 }
